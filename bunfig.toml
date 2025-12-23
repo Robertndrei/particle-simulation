@@ -1,0 +1,6 @@
+[bundle]
+entrypoints = ["./src/main.ts"]
+outdir = "./dist"
+minify = true
+sourcemap = "external"
+target = "browser"
