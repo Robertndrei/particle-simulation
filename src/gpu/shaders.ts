@@ -13,10 +13,11 @@ struct Particle {
 }
 `;
 
+// All fields as f32 for simplicity - we cast to u32/bool in shader
 const CONFIG_STRUCT = `
 struct Config {
-  particleCount: u32,
-  particleTypes: u32,
+  particleCount: f32,
+  particleTypes: f32,
   worldWidth: f32,
   worldHeight: f32,
 
@@ -30,14 +31,14 @@ struct Config {
   maxSpeed: f32,
   interFriction: f32,
 
-  gravityEnabled: u32,
+  gravityEnabled: f32,
   gravityX: f32,
   gravityY: f32,
-  noiseEnabled: u32,
+  noiseEnabled: f32,
 
   noiseStrength: f32,
-  wrapEdges: u32,
-  mouseMode: u32,
+  wrapEdges: f32,
+  mouseMode: f32,
   mouseX: f32,
 
   mouseY: f32,
@@ -132,14 +133,21 @@ fn random(seed: u32, offset: u32) -> f32 {
   return hash(seed + offset * 1000u) * 2.0 - 1.0;
 }
 
-fn getInteraction(typeA: u32, typeB: u32) -> f32 {
-  return interactionMatrix[typeA * config.particleTypes + typeB];
+fn getInteraction(typeA: u32, typeB: u32, numTypes: u32) -> f32 {
+  return interactionMatrix[typeA * numTypes + typeB];
 }
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let i = id.x;
-  if (i >= config.particleCount) { return; }
+  let particleCount = u32(config.particleCount);
+  let numTypes = u32(config.particleTypes);
+  let wrapEdges = config.wrapEdges > 0.5;
+  let gravityEnabled = config.gravityEnabled > 0.5;
+  let noiseEnabled = config.noiseEnabled > 0.5;
+  let mouseMode = u32(config.mouseMode);
+
+  if (i >= particleCount) { return; }
 
   var p = particlesIn[i];
   let pType = u32(p.ptype);
@@ -154,8 +162,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let halfH = config.worldHeight / 2.0;
 
   // Calculate forces from all other particles
-  // TODO: Use spatial hash for better performance
-  for (var j = 0u; j < config.particleCount; j++) {
+  for (var j = 0u; j < particleCount; j++) {
     if (i == j) { continue; }
 
     let other = particlesIn[j];
@@ -164,7 +171,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let oType = u32(other.ptype);
 
     // Wrap-around distance
-    if (config.wrapEdges != 0u) {
+    if (wrapEdges) {
       if (dx > halfW) { dx -= config.worldWidth; }
       if (dx < -halfW) { dx += config.worldWidth; }
       if (dy > halfH) { dy -= config.worldHeight; }
@@ -172,15 +179,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
 
     let distSq = dx * dx + dy * dy;
-    let dist = sqrt(distSq);
 
+    // Early exit if too far
+    if (distSq > config.interactionRadius * config.interactionRadius) { continue; }
+
+    let dist = sqrt(distSq);
     if (dist < 1.0) { continue; }
-    if (dist > config.interactionRadius) { continue; }
 
     let nx = dx / dist;
     let ny = dy / dist;
 
-    let interaction = getInteraction(pType, oType);
+    let interaction = getInteraction(pType, oType, numTypes);
 
     // Physical collision
     if (dist < config.minDistance) {
@@ -223,20 +232,20 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   p.vy += ay;
 
   // Apply global gravity
-  if (config.gravityEnabled != 0u) {
+  if (gravityEnabled) {
     p.vx += config.gravityX;
     p.vy += config.gravityY;
   }
 
   // Noise/turbulence
-  if (config.noiseEnabled != 0u) {
+  if (noiseEnabled) {
     let seed = u32(config.randomSeed * 1000.0) + i;
     p.vx += random(seed, 0u) * config.noiseStrength;
     p.vy += random(seed, 1u) * config.noiseStrength;
   }
 
   // Mouse interaction
-  if (config.mouseMode != 0u) {
+  if (mouseMode > 0u) {
     let mdx = p.x - config.mouseX;
     let mdy = p.y - config.mouseY;
     let mouseDist = sqrt(mdx * mdx + mdy * mdy);
@@ -246,13 +255,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       let mnx = mdx / mouseDist;
       let mny = mdy / mouseDist;
 
-      if (config.mouseMode == 1u) { // Repel
+      if (mouseMode == 1u) { // Repel
         p.vx += mnx * force;
         p.vy += mny * force;
-      } else if (config.mouseMode == 2u) { // Attract
+      } else if (mouseMode == 2u) { // Attract
         p.vx -= mnx * force;
         p.vy -= mny * force;
-      } else if (config.mouseMode == 3u) { // Vortex
+      } else if (mouseMode == 3u) { // Vortex
         p.vx += -mny * force;
         p.vy += mnx * force;
       }
@@ -275,7 +284,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   p.y += p.vy;
 
   // Handle edges
-  if (config.wrapEdges != 0u) {
+  if (wrapEdges) {
     if (p.x > halfW) { p.x -= config.worldWidth; }
     if (p.x < -halfW) { p.x += config.worldWidth; }
     if (p.y > halfH) { p.y -= config.worldHeight; }
