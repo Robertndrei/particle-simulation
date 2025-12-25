@@ -1,7 +1,7 @@
 import GUI from 'lil-gui';
 import type { SimulationConfig, InteractionMatrix } from '../types';
-import { MouseMode } from '../types';
-import { COLOR_NAMES } from '../config/defaults';
+import { MouseMode, ColorMode, PresetName } from '../types';
+import { COLOR_NAMES, PRESETS } from '../config/defaults';
 
 /**
  * Callbacks for GUI events
@@ -10,16 +10,19 @@ export interface GUICallbacks {
   onConfigChange: () => void;
   onMatrixChange: () => void;
   onReset: () => void;
+  onAttractorsChange?: () => void;
+  onObstaclesChange?: () => void;
 }
 
 /**
- * GUI controller
+ * GUI controller with all simulation options
  */
 export class GUIController {
   private gui: GUI;
   private interactionControllers: GUI[] = [];
   private interactionsFolder: GUI;
   private callbacks: GUICallbacks;
+  private recordingButton: any = null;
 
   constructor(
     config: SimulationConfig,
@@ -27,16 +30,38 @@ export class GUIController {
     callbacks: GUICallbacks
   ) {
     this.callbacks = callbacks;
-    this.gui = new GUI({ title: 'Configuration' });
+    this.gui = new GUI({ title: 'Particle Simulation' });
 
+    // Setup all folders
+    this.setupPresetsFolder(config);
     this.setupForcesFolder(config);
     this.setupPhysicsFolder(config);
+    this.setupGravityFolder(config);
     this.setupParticlesFolder(config);
     this.setupWorldFolder(config);
+    this.setupCameraFolder(config);
     this.setupMouseFolder(config);
-    this.setupEffectsFolder(config);
+    this.setupVisualEffectsFolder(config);
+    this.setupPhysicsEffectsFolder(config);
+    this.setupAnalysisFolder(config);
+    this.setupAudioFolder(config);
     this.interactionsFolder = this.setupInteractionsFolder(config, interactionMatrix);
     this.setupActionsFolder(config);
+    this.setupExportFolder(config);
+  }
+
+  private setupPresetsFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Presets');
+    const presetNames = Object.values(PresetName);
+
+    const presetObj = {
+      preset: PresetName.Default,
+      apply: () => config.applyPreset(presetObj.preset)
+    };
+
+    folder.add(presetObj, 'preset', presetNames).name('Select Preset');
+    folder.add(presetObj, 'apply').name('Apply Preset');
+    folder.open();
   }
 
   private setupForcesFolder(config: SimulationConfig): void {
@@ -78,7 +103,22 @@ export class GUIController {
       .add(config, 'interFriction', 0, 1, 0.05)
       .name('Inter-Friction')
       .onChange(this.callbacks.onConfigChange);
-    folder.open();
+  }
+
+  private setupGravityFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Gravity');
+    folder
+      .add(config, 'gravityEnabled')
+      .name('Enabled')
+      .onChange(this.callbacks.onConfigChange);
+    folder
+      .add(config, 'gravityX', -0.5, 0.5, 0.01)
+      .name('X Direction')
+      .onChange(this.callbacks.onConfigChange);
+    folder
+      .add(config, 'gravityY', -0.5, 0.5, 0.01)
+      .name('Y Direction')
+      .onChange(this.callbacks.onConfigChange);
   }
 
   private setupParticlesFolder(config: SimulationConfig): void {
@@ -95,6 +135,12 @@ export class GUIController {
       .add(config, 'particleRadius', 1, 10, 0.5)
       .name('Visual Radius')
       .onChange(this.callbacks.onReset);
+    folder
+      .add(config, 'particleSizeByVelocity')
+      .name('Size by Velocity');
+    folder
+      .add(config, 'particleSizeMultiplier', 1, 3, 0.1)
+      .name('Size Multiplier');
   }
 
   private setupWorldFolder(config: SimulationConfig): void {
@@ -103,12 +149,29 @@ export class GUIController {
       .add(config, 'wrapEdges')
       .name('Wrap Edges')
       .onChange(this.callbacks.onConfigChange);
+    folder.add(config, 'clearAttractors').name('Clear Attractors');
+    folder.add(config, 'clearObstacles').name('Clear Obstacles');
+  }
+
+  private setupCameraFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Camera');
+    folder.add(config, 'zoom', 0.1, 5, 0.1).name('Zoom');
+    folder.add(config, 'panX', -1000, 1000, 10).name('Pan X');
+    folder.add(config, 'panY', -1000, 1000, 10).name('Pan Y');
+
+    const resetCamera = { reset: () => {
+      config.zoom = 1;
+      config.panX = 0;
+      config.panY = 0;
+      this.gui.controllersRecursive().forEach(c => c.updateDisplay());
+    }};
+    folder.add(resetCamera, 'reset').name('Reset Camera');
   }
 
   private setupMouseFolder(config: SimulationConfig): void {
     const folder = this.gui.addFolder('Mouse');
     folder
-      .add(config, 'mouseMode', [MouseMode.None, MouseMode.Repel, MouseMode.Attract])
+      .add(config, 'mouseMode', Object.values(MouseMode))
       .name('Mode')
       .onChange(this.callbacks.onConfigChange);
     folder
@@ -119,10 +182,43 @@ export class GUIController {
       .add(config, 'mouseStrength', 0.5, 10, 0.5)
       .name('Strength')
       .onChange(this.callbacks.onConfigChange);
+    folder
+      .add(config, 'spawnType', 0, 9, 1)
+      .name('Spawn Type')
+      .onChange(this.callbacks.onConfigChange);
   }
 
-  private setupEffectsFolder(config: SimulationConfig): void {
-    const folder = this.gui.addFolder('Effects');
+  private setupVisualEffectsFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Visual Effects');
+
+    // Color mode
+    folder
+      .add(config, 'colorMode', Object.values(ColorMode))
+      .name('Color Mode');
+    folder
+      .add(config, 'velocityColorScale', 0.1, 3, 0.1)
+      .name('Velocity Scale');
+
+    // Bloom
+    folder.add(config, 'bloomEnabled').name('Bloom');
+    folder.add(config, 'bloomStrength', 0.5, 5, 0.1).name('Bloom Strength');
+    folder.add(config, 'bloomRadius', 0.1, 1, 0.1).name('Bloom Radius');
+    folder.add(config, 'bloomThreshold', 0, 1, 0.1).name('Bloom Threshold');
+
+    // Connections
+    folder.add(config, 'connectionsEnabled').name('Connections');
+    folder.add(config, 'connectionDistance', 10, 200, 5).name('Connection Dist');
+    folder.add(config, 'connectionOpacity', 0.1, 1, 0.1).name('Connection Opacity');
+
+    // Trails
+    folder.add(config, 'trailsEnabled').name('Trails');
+    folder.add(config, 'trailLength', 0.5, 0.99, 0.01).name('Trail Length');
+  }
+
+  private setupPhysicsEffectsFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Physics Effects');
+
+    // Noise
     folder
       .add(config, 'noiseEnabled')
       .name('Noise/Turbulence')
@@ -131,8 +227,8 @@ export class GUIController {
       .add(config, 'noiseStrength', 0, 0.5, 0.01)
       .name('Noise Strength')
       .onChange(this.callbacks.onConfigChange);
-    folder.add(config, 'trailsEnabled').name('Trails');
-    folder.add(config, 'trailLength', 0.5, 0.99, 0.01).name('Trail Length');
+
+    // Radiation
     folder
       .add(config, 'radiationEnabled')
       .name('Radiation')
@@ -145,6 +241,8 @@ export class GUIController {
       .add(config, 'radiationSpeed', 5, 500, 1)
       .name('Radiation Speed')
       .onChange(this.callbacks.onConfigChange);
+
+    // Wind
     folder
       .add(config, 'windEnabled')
       .name('Winds')
@@ -163,11 +261,28 @@ export class GUIController {
       .onChange(this.callbacks.onConfigChange);
   }
 
+  private setupAnalysisFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Analysis');
+    folder.add(config, 'showStats').name('Show Stats');
+    folder.add(config, 'showEnergyGraph').name('Energy Graph');
+    folder.add(config, 'showHeatmap').name('Density Heatmap');
+    folder.add(config, 'heatmapOpacity', 0.1, 1, 0.1).name('Heatmap Opacity');
+    folder.add(config, 'detectClusters').name('Detect Clusters')
+      .onChange(this.callbacks.onConfigChange);
+  }
+
+  private setupAudioFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Audio Reactive');
+    folder.add(config, 'audioEnabled').name('Enable Audio');
+    folder.add(config, 'audioSensitivity', 0.1, 3, 0.1).name('Sensitivity');
+    folder.add(config, 'audioSmoothing', 0.1, 0.99, 0.01).name('Smoothing');
+  }
+
   private setupInteractionsFolder(
     config: SimulationConfig,
     interactionMatrix: InteractionMatrix
   ): GUI {
-    const folder = this.gui.addFolder('Interactions (↑attract ↓repel)');
+    const folder = this.gui.addFolder('Interactions');
     this.interactionsFolder = folder;
     this.updateInteractionControls(config, interactionMatrix);
     return folder;
@@ -175,9 +290,24 @@ export class GUIController {
 
   private setupActionsFolder(config: SimulationConfig): void {
     const folder = this.gui.addFolder('Actions');
-    folder.add(config, 'reset').name('Reset');
-    folder.add(config, 'randomizeForces').name('Randomize');
+    folder.add(config, 'reset').name('Reset Particles');
+    folder.add(config, 'randomizeForces').name('Randomize Forces');
     folder.open();
+  }
+
+  private setupExportFolder(config: SimulationConfig): void {
+    const folder = this.gui.addFolder('Export / Import');
+    folder.add(config, 'saveConfig').name('Save Config');
+    folder.add(config, 'loadConfig').name('Load Config');
+    folder.add(config, 'takeScreenshot').name('Screenshot');
+
+    const recordingState = { label: 'Start Recording' };
+    this.recordingButton = folder.add(recordingState, 'label').name('Recording');
+    this.recordingButton.disable();
+
+    folder.add(config, 'startRecording').name('Start Recording');
+    folder.add(config, 'stopRecording').name('Stop Recording');
+    folder.add(config, 'exportData').name('Export CSV');
   }
 
   /**
@@ -209,6 +339,13 @@ export class GUIController {
         this.interactionControllers.push(ctrl as unknown as GUI);
       }
     }
+  }
+
+  /**
+   * Updates all GUI controls to reflect current config values
+   */
+  updateDisplay(): void {
+    this.gui.controllersRecursive().forEach(c => c.updateDisplay());
   }
 
   /**

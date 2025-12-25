@@ -1,4 +1,4 @@
-import type { WorkerConfig, InteractionMatrix, MainToWorkerMessage } from '../types';
+import type { WorkerConfig, InteractionMatrix, MainToWorkerMessage, Attractor, Obstacle } from '../types';
 import { WorkerMessageType } from '../types';
 import { PhysicsEngine } from './forces';
 
@@ -10,6 +10,7 @@ let config: WorkerConfig | null = null;
 let interactionMatrix: InteractionMatrix = [];
 let mouseX = 0;
 let mouseY = 0;
+let sendStats = false;
 
 const physicsEngine = new PhysicsEngine();
 
@@ -43,6 +44,14 @@ self.onmessage = (e: MessageEvent<MainToWorkerMessage>) => {
     case WorkerMessageType.AddParticles:
       handleAddParticles(message.data);
       break;
+
+    case WorkerMessageType.UpdateAttractors:
+      handleUpdateAttractors(message.data);
+      break;
+
+    case WorkerMessageType.UpdateObstacles:
+      handleUpdateObstacles(message.data);
+      break;
   }
 };
 
@@ -50,11 +59,15 @@ function handleInit(data: {
   particles: ArrayBuffer;
   config: WorkerConfig;
   interactionMatrix: InteractionMatrix;
+  attractors: Attractor[];
+  obstacles: Obstacle[];
 }): void {
   particles = new Float32Array(data.particles);
   config = data.config;
   interactionMatrix = data.interactionMatrix;
   physicsEngine.initializeWinds(config.windCount);
+  physicsEngine.setAttractors(data.attractors || []);
+  physicsEngine.setObstacles(data.obstacles || []);
 
   self.postMessage({ type: WorkerMessageType.Ready });
 }
@@ -70,6 +83,22 @@ function handleUpdate(): void {
     { type: WorkerMessageType.Positions, particles: copy.buffer },
     [copy.buffer]
   );
+
+  // Send stats periodically (every 10 frames roughly)
+  if (sendStats) {
+    const stats = physicsEngine.getStats();
+    self.postMessage({
+      type: WorkerMessageType.Stats,
+      stats: {
+        kineticEnergy: stats.kineticEnergy,
+        avgVelocity: stats.avgVelocity,
+        maxVelocity: stats.maxVelocity,
+        clusterCount: stats.clusterCount,
+        densityMap: null
+      }
+    });
+  }
+  sendStats = !sendStats; // Toggle to send every other frame
 }
 
 function handleUpdateConfig(data: Partial<WorkerConfig>): void {
@@ -95,4 +124,12 @@ function handleAddParticles(data: ArrayBuffer): void {
   newParticles.set(particles);
   newParticles.set(newData, particles.length);
   particles = newParticles;
+}
+
+function handleUpdateAttractors(data: Attractor[]): void {
+  physicsEngine.setAttractors(data);
+}
+
+function handleUpdateObstacles(data: Obstacle[]): void {
+  physicsEngine.setObstacles(data);
 }

@@ -1,6 +1,6 @@
 import { WorkerMessageType } from './enums';
 import type { WorkerConfig } from './config';
-import type { InteractionMatrix, MousePosition } from './particle';
+import type { InteractionMatrix, MousePosition, Attractor, Obstacle, SimulationStats } from './particle';
 
 /**
  * Worker initialization message
@@ -11,6 +11,8 @@ export interface WorkerInitMessage {
     particles: ArrayBuffer;
     config: WorkerConfig;
     interactionMatrix: InteractionMatrix;
+    attractors: Attractor[];
+    obstacles: Obstacle[];
   };
 }
 
@@ -54,6 +56,22 @@ export interface WorkerAddParticlesMessage {
 }
 
 /**
+ * Message to update attractors
+ */
+export interface WorkerUpdateAttractorsMessage {
+  type: WorkerMessageType.UpdateAttractors;
+  data: Attractor[];
+}
+
+/**
+ * Message to update obstacles
+ */
+export interface WorkerUpdateObstaclesMessage {
+  type: WorkerMessageType.UpdateObstacles;
+  data: Obstacle[];
+}
+
+/**
  * Union of all messages sent from main thread to worker
  */
 export type MainToWorkerMessage =
@@ -62,7 +80,9 @@ export type MainToWorkerMessage =
   | WorkerUpdateConfigMessage
   | WorkerUpdateMatrixMessage
   | WorkerUpdateMouseMessage
-  | WorkerAddParticlesMessage;
+  | WorkerAddParticlesMessage
+  | WorkerUpdateAttractorsMessage
+  | WorkerUpdateObstaclesMessage;
 
 /**
  * Worker ready message
@@ -80,6 +100,14 @@ export interface WorkerPositionsMessage {
 }
 
 /**
+ * Message with simulation statistics
+ */
+export interface WorkerStatsMessage {
+  type: WorkerMessageType.Stats;
+  stats: SimulationStats;
+}
+
+/**
  * Union of all messages sent from worker to main thread
  */
-export type WorkerToMainMessage = WorkerReadyMessage | WorkerPositionsMessage;
+export type WorkerToMainMessage = WorkerReadyMessage | WorkerPositionsMessage | WorkerStatsMessage;

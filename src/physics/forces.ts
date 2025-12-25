@@ -1,5 +1,5 @@
-import type { WorkerConfig, InteractionMatrix } from '../types';
-import { PARTICLE_STRIDE, ParticleIndex, MouseMode } from '../types';
+import type { WorkerConfig, InteractionMatrix, Attractor, Obstacle, SimulationStats } from '../types';
+import { PARTICLE_STRIDE, ParticleIndex, MouseMode, AttractorType } from '../types';
 import { SpatialHash } from './spatial-hash';
 
 /**
@@ -47,6 +47,19 @@ export class PhysicsEngine {
   private windSystem: WindSystem;
   private nextState: Float32Array | null = null;
 
+  // Fixed attractors and obstacles
+  private attractors: Attractor[] = [];
+  private obstacles: Obstacle[] = [];
+
+  // Statistics
+  private stats: SimulationStats = {
+    kineticEnergy: 0,
+    avgVelocity: 0,
+    maxVelocity: 0,
+    clusterCount: 0,
+    densityMap: null
+  };
+
   constructor() {
     this.spatialHash = new SpatialHash();
     this.windSystem = new WindSystem();
@@ -54,6 +67,18 @@ export class PhysicsEngine {
 
   initializeWinds(count: number): void {
     this.windSystem.initialize(count);
+  }
+
+  setAttractors(attractors: Attractor[]): void {
+    this.attractors = attractors;
+  }
+
+  setObstacles(obstacles: Obstacle[]): void {
+    this.obstacles = obstacles;
+  }
+
+  getStats(): SimulationStats {
+    return this.stats;
   }
 
   /**
@@ -88,6 +113,11 @@ export class PhysicsEngine {
       ? this.windSystem.getWindForce(config.windStrength)
       : { wx: 0, wy: 0 };
 
+    // Reset stats
+    let totalKE = 0;
+    let totalSpeed = 0;
+    let maxSpeed = 0;
+
     // PHASE 1: Calculate new state for ALL particles
     // Read from 'particles' (current state), write to 'nextState'
     for (let i = 0; i < count; i++) {
@@ -103,7 +133,21 @@ export class PhysicsEngine {
         halfH,
         windForce
       );
+
+      // Calculate stats
+      const idx = i * PARTICLE_STRIDE;
+      const vx = this.nextState[idx + ParticleIndex.VX];
+      const vy = this.nextState[idx + ParticleIndex.VY];
+      const speed = Math.sqrt(vx * vx + vy * vy);
+      totalKE += 0.5 * speed * speed;
+      totalSpeed += speed;
+      if (speed > maxSpeed) maxSpeed = speed;
     }
+
+    // Update stats
+    this.stats.kineticEnergy = totalKE;
+    this.stats.avgVelocity = count > 0 ? totalSpeed / count : 0;
+    this.stats.maxVelocity = maxSpeed;
 
     // PHASE 2: Copy new state to main buffer
     particles.set(this.nextState);
@@ -209,6 +253,54 @@ export class PhysicsEngine {
     vx += ax;
     vy += ay;
 
+    // Apply global gravity
+    if (config.gravityEnabled) {
+      vx += config.gravityX;
+      vy += config.gravityY;
+    }
+
+    // Apply fixed attractors/repulsors/vortices
+    for (const attractor of this.attractors) {
+      const adx = attractor.x - px;
+      const ady = attractor.y - py;
+      const aDist = Math.sqrt(adx * adx + ady * ady);
+
+      if (aDist < attractor.radius && aDist > 1) {
+        const strength = attractor.strength * (1 - aDist / attractor.radius);
+
+        switch (attractor.type) {
+          case AttractorType.Attractor:
+            vx += (adx / aDist) * strength;
+            vy += (ady / aDist) * strength;
+            break;
+          case AttractorType.Repulsor:
+            vx -= (adx / aDist) * strength;
+            vy -= (ady / aDist) * strength;
+            break;
+          case AttractorType.Vortex:
+            // Perpendicular force (tangent to circle)
+            vx += (-ady / aDist) * strength;
+            vy += (adx / aDist) * strength;
+            break;
+        }
+      }
+    }
+
+    // Apply obstacle collisions
+    for (const obstacle of this.obstacles) {
+      const collision = this.checkObstacleCollision(
+        px, py, vx, vy,
+        obstacle.x1, obstacle.y1, obstacle.x2, obstacle.y2,
+        obstacle.thickness
+      );
+      if (collision) {
+        vx = collision.vx;
+        vy = collision.vy;
+        px = collision.px;
+        py = collision.py;
+      }
+    }
+
     // Noise/turbulence
     if (config.noiseEnabled) {
       vx += (Math.random() - 0.5) * config.noiseStrength;
@@ -240,15 +332,24 @@ export class PhysicsEngine {
     }
 
     // Mouse effect
-    if (config.mouseMode !== MouseMode.None) {
+    if (config.mouseMode !== MouseMode.None && config.mouseMode !== MouseMode.Spawn && config.mouseMode !== MouseMode.Obstacle) {
       const mdx = px - mouseX;
       const mdy = py - mouseY;
       const mouseDist = Math.sqrt(mdx * mdx + mdy * mdy);
       if (mouseDist < config.mouseRadius && mouseDist > 1) {
         const force = config.mouseStrength * (1 - mouseDist / config.mouseRadius);
-        const dir = config.mouseMode === MouseMode.Repel ? 1 : -1;
-        vx += (mdx / mouseDist) * force * dir;
-        vy += (mdy / mouseDist) * force * dir;
+
+        if (config.mouseMode === MouseMode.Repel) {
+          vx += (mdx / mouseDist) * force;
+          vy += (mdy / mouseDist) * force;
+        } else if (config.mouseMode === MouseMode.Attract) {
+          vx -= (mdx / mouseDist) * force;
+          vy -= (mdy / mouseDist) * force;
+        } else if (config.mouseMode === MouseMode.Vortex) {
+          // Perpendicular force
+          vx += (-mdy / mouseDist) * force;
+          vy += (mdx / mouseDist) * force;
+        }
       }
     }
 
@@ -310,5 +411,60 @@ export class PhysicsEngine {
     next[idx + ParticleIndex.VX] = vx;
     next[idx + ParticleIndex.VY] = vy;
     next[idx + ParticleIndex.Type] = pType;
+  }
+
+  /**
+   * Checks collision with a line obstacle
+   */
+  private checkObstacleCollision(
+    px: number, py: number,
+    vx: number, vy: number,
+    x1: number, y1: number,
+    x2: number, y2: number,
+    thickness: number
+  ): { px: number; py: number; vx: number; vy: number } | null {
+    // Line direction
+    const ldx = x2 - x1;
+    const ldy = y2 - y1;
+    const lineLen = Math.sqrt(ldx * ldx + ldy * ldy);
+
+    if (lineLen < 1) return null;
+
+    // Line normal
+    const nx = -ldy / lineLen;
+    const ny = ldx / lineLen;
+
+    // Vector from line start to particle
+    const pdx = px - x1;
+    const pdy = py - y1;
+
+    // Project onto line direction (parametric t)
+    const t = (pdx * ldx + pdy * ldy) / (lineLen * lineLen);
+
+    // Check if within line segment
+    if (t < 0 || t > 1) return null;
+
+    // Distance to line
+    const dist = pdx * nx + pdy * ny;
+
+    if (Math.abs(dist) < thickness / 2) {
+      // Collision! Push out and reflect velocity
+      const sign = dist >= 0 ? 1 : -1;
+      const pushDist = (thickness / 2 - Math.abs(dist) + 1) * sign;
+
+      // Reflect velocity
+      const dot = vx * nx + vy * ny;
+      const reflectVx = vx - 2 * dot * nx;
+      const reflectVy = vy - 2 * dot * ny;
+
+      return {
+        px: px + nx * pushDist,
+        py: py + ny * pushDist,
+        vx: reflectVx * 0.5,
+        vy: reflectVy * 0.5
+      };
+    }
+
+    return null;
   }
 }

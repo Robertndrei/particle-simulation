@@ -1,3 +1,5 @@
+import { AttractorType } from './enums';
+
 /**
  * Data structure for an individual particle
  */
@@ -39,4 +41,49 @@ export type InteractionMatrix = number[][];
 export interface MousePosition {
   x: number;
   y: number;
+}
+
+/**
+ * Fixed attractor/repulsor/vortex in the world
+ */
+export interface Attractor {
+  id: string;
+  x: number;
+  y: number;
+  type: AttractorType;
+  strength: number;
+  radius: number;
+}
+
+/**
+ * Obstacle (wall/barrier) in the world
+ */
+export interface Obstacle {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  thickness: number;
+}
+
+/**
+ * Simulation statistics for analysis
+ */
+export interface SimulationStats {
+  kineticEnergy: number;
+  avgVelocity: number;
+  maxVelocity: number;
+  clusterCount: number;
+  densityMap: Float32Array | null;
+}
+
+/**
+ * Preset configuration
+ */
+export interface SimulationPreset {
+  name: string;
+  description: string;
+  config: Partial<import('./config').SimulationConfig>;
+  matrix?: InteractionMatrix;
 }
