@@ -26,6 +26,10 @@ import { Renderer } from './renderer';
 import { GUIController } from './gui/controls';
 import { AudioAnalyzer } from './audio/analyzer';
 import { Exporter } from './utils/exporter';
+import { detectWebGPU, WebGPUComputeEngine } from './gpu';
+import type { WebGPUCapabilities } from './gpu';
+
+type SimulationBackend = 'webgpu' | 'worker';
 
 /**
  * Main particle simulation application with all features
@@ -35,7 +39,7 @@ class ParticleSimulation {
   private interactionMatrix: InteractionMatrix = [];
   private renderer: Renderer;
   private gui: GUIController;
-  private worker: Worker;
+  private worker: Worker | null = null;
   private particleData: Float32Array | null = null;
   private workerBusy = false;
   private pendingConfig = false;
@@ -46,6 +50,12 @@ class ParticleSimulation {
   private mouseY = 0;
   private lastTime = performance.now();
   private frameCount = 0;
+
+  // WebGPU support
+  private backend: SimulationBackend = 'worker';
+  private webgpuCapabilities: WebGPUCapabilities | null = null;
+  private gpuEngine: WebGPUComputeEngine | null = null;
+  private gpuReadPending = false;
 
   // New systems
   private audioAnalyzer: AudioAnalyzer;
@@ -68,6 +78,7 @@ class ParticleSimulation {
   private countElement: HTMLElement;
   private workerStatusElement: HTMLElement;
   private statsElement: HTMLElement | null = null;
+  private backendElement: HTMLElement | null = null;
 
   constructor() {
     // Configuration
@@ -85,17 +96,10 @@ class ParticleSimulation {
     this.renderer = new Renderer();
     document.body.appendChild(this.renderer.getDomElement());
 
-    // Worker
-    this.worker = new Worker(
-      new URL('./physics/worker.ts', import.meta.url),
-      { type: 'module' }
-    );
-    this.setupWorkerHandlers();
-
     // GUI
     this.gui = new GUIController(this.config, this.interactionMatrix, {
-      onConfigChange: () => this.sendConfigToWorker(),
-      onMatrixChange: () => this.sendMatrixToWorker(),
+      onConfigChange: () => this.sendConfigToBackend(),
+      onMatrixChange: () => this.sendMatrixToBackend(),
       onReset: () => this.initParticles(),
       onAttractorsChange: () => this.sendAttractorsToWorker(),
       onObstaclesChange: () => this.sendObstaclesToWorker()
@@ -106,6 +110,7 @@ class ParticleSimulation {
     this.countElement = document.getElementById('count')!;
     this.workerStatusElement = document.getElementById('worker-status')!;
     this.createStatsElement();
+    this.createBackendElement();
 
     // Events
     this.setupEventListeners();
@@ -113,9 +118,69 @@ class ParticleSimulation {
     // Load config from URL if present
     this.loadConfigFromUrl();
 
-    // Start
+    // Initialize backend (async) and start
+    this.initializeBackend();
+  }
+
+  /**
+   * Initialize the simulation backend (WebGPU or Worker)
+   */
+  private async initializeBackend(): Promise<void> {
+    // Try WebGPU first
+    this.webgpuCapabilities = await detectWebGPU();
+
+    if (this.webgpuCapabilities.supported && this.webgpuCapabilities.device) {
+      this.backend = 'webgpu';
+      this.gpuEngine = new WebGPUComputeEngine(this.webgpuCapabilities.device);
+      this.updateBackendDisplay();
+      console.log('Using WebGPU compute backend');
+    } else {
+      this.backend = 'worker';
+      this.initWorker();
+      this.updateBackendDisplay();
+      console.log('Using Web Worker backend');
+    }
+
+    // Start simulation
     this.initParticles();
     this.animate();
+  }
+
+  private initWorker(): void {
+    this.worker = new Worker(
+      new URL('./physics/worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+    this.setupWorkerHandlers();
+  }
+
+  private createBackendElement(): void {
+    this.backendElement = document.createElement('div');
+    this.backendElement.id = 'backend-status';
+    this.backendElement.style.cssText = `
+      position: absolute;
+      top: 30px;
+      right: 10px;
+      color: #fff;
+      font-family: monospace;
+      font-size: 11px;
+      background: rgba(0,0,0,0.7);
+      padding: 4px 8px;
+      border-radius: 4px;
+    `;
+    document.body.appendChild(this.backendElement);
+  }
+
+  private updateBackendDisplay(): void {
+    if (!this.backendElement) return;
+
+    if (this.backend === 'webgpu') {
+      this.backendElement.innerHTML = `<span style="color:#4f4">&#9679;</span> WebGPU`;
+      this.backendElement.title = 'Physics running on GPU';
+    } else {
+      this.backendElement.innerHTML = `<span style="color:#ff4">&#9679;</span> Worker`;
+      this.backendElement.title = 'Physics running on CPU (Web Worker)';
+    }
   }
 
   private setupConfigCallbacks(): void {
@@ -126,10 +191,10 @@ class ParticleSimulation {
       Object.assign(this.config, cfg);
       if (matrix) {
         this.interactionMatrix = matrix;
-        this.sendMatrixToWorker();
+        this.sendMatrixToBackend();
       }
       this.gui.updateDisplay();
-      this.sendConfigToWorker();
+      this.sendConfigToBackend();
       this.initParticles();
     });
     this.config.applyPreset = (presetName: PresetName) => {
@@ -144,7 +209,7 @@ class ParticleSimulation {
           }
           this.interactionMatrix.push(row);
         }
-        this.sendMatrixToWorker();
+        this.sendMatrixToBackend();
       }
       this.gui.updateDisplay();
       this.initParticles();
@@ -257,7 +322,7 @@ class ParticleSimulation {
       this.config.worldWidth = window.innerWidth;
       this.config.worldHeight = window.innerHeight;
       this.renderer.handleResize();
-      this.sendConfigToWorker();
+      this.sendConfigToBackend();
     });
 
     const canvas = this.renderer.getDomElement();
@@ -267,10 +332,15 @@ class ParticleSimulation {
       const zoom = this.config.zoom;
       this.mouseX = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
       this.mouseY = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
-      this.worker.postMessage({
-        type: WorkerMessageType.UpdateMouse,
-        data: { x: this.mouseX, y: this.mouseY }
-      });
+
+      // Update worker if using worker backend
+      if (this.backend === 'worker' && this.worker) {
+        this.worker.postMessage({
+          type: WorkerMessageType.UpdateMouse,
+          data: { x: this.mouseX, y: this.mouseY }
+        });
+      }
+      // WebGPU receives mouse position in updateConfig() each frame
 
       // Drawing obstacle
       if (this.isDrawingObstacle && this.config.mouseMode === MouseMode.Obstacle) {
@@ -315,6 +385,9 @@ class ParticleSimulation {
     canvas.addEventListener('click', (e) => {
       if (!this.particleData) return;
       if (this.config.mouseMode === MouseMode.Obstacle) return; // Handled by mouse up
+
+      // Adding particles at runtime only supported in worker mode
+      if (this.backend !== 'worker' || !this.worker) return;
 
       const zoom = this.config.zoom;
       const x = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
@@ -418,7 +491,7 @@ class ParticleSimulation {
     }
   }
 
-  private initParticles(): void {
+  private async initParticles(): Promise<void> {
     this.interactionMatrix = createInteractionMatrix(this.config.particleTypes);
 
     const totalParticles = this.config.particlesPerType * this.config.particleTypes;
@@ -442,21 +515,32 @@ class ParticleSimulation {
     // Initialize renderer
     this.renderer.initializeParticles(this.config);
 
-    // Send to worker
-    const transferBuffer = this.particleData.buffer.slice(0);
-    this.worker.postMessage(
-      {
-        type: WorkerMessageType.Init,
-        data: {
-          particles: transferBuffer,
-          config: getWorkerConfig(this.config),
-          interactionMatrix: this.interactionMatrix,
-          attractors: this.config.attractors,
-          obstacles: this.config.obstacles
-        }
-      },
-      [transferBuffer]
-    );
+    if (this.backend === 'webgpu' && this.gpuEngine) {
+      // Initialize WebGPU compute engine
+      await this.gpuEngine.initialize(
+        totalParticles,
+        this.config.particleTypes,
+        this.particleData
+      );
+      this.gpuEngine.updateInteractionMatrix(this.interactionMatrix, this.config.particleTypes);
+      this.workerStatusElement.textContent = 'GPU: active';
+    } else if (this.worker) {
+      // Send to worker
+      const transferBuffer = this.particleData.buffer.slice(0);
+      this.worker.postMessage(
+        {
+          type: WorkerMessageType.Init,
+          data: {
+            particles: transferBuffer,
+            config: getWorkerConfig(this.config),
+            interactionMatrix: this.interactionMatrix,
+            attractors: this.config.attractors,
+            obstacles: this.config.obstacles
+          }
+        },
+        [transferBuffer]
+      );
+    }
 
     this.countElement.textContent = String(totalParticles);
     this.gui.updateInteractionControls(this.config, this.interactionMatrix);
@@ -464,36 +548,56 @@ class ParticleSimulation {
 
   private randomizeInteractions(): void {
     randomizeInteractionMatrix(this.interactionMatrix);
-    this.worker.postMessage({
-      type: WorkerMessageType.UpdateMatrix,
-      data: this.interactionMatrix
-    });
+    this.sendMatrixToBackend();
     this.gui.updateInteractionControls(this.config, this.interactionMatrix);
   }
 
-  private sendConfigToWorker(): void {
-    if (this.workerBusy) {
-      this.pendingConfig = true;
-    } else {
-      this.worker.postMessage({
-        type: WorkerMessageType.UpdateConfig,
-        data: getWorkerConfig(this.config)
-      });
+  /**
+   * Send config to the active backend (WebGPU or Worker)
+   */
+  private sendConfigToBackend(): void {
+    if (this.backend === 'webgpu') {
+      // WebGPU config is updated every frame in animate()
+      return;
+    }
+
+    if (this.worker) {
+      if (this.workerBusy) {
+        this.pendingConfig = true;
+      } else {
+        this.worker.postMessage({
+          type: WorkerMessageType.UpdateConfig,
+          data: getWorkerConfig(this.config)
+        });
+      }
     }
   }
 
-  private sendMatrixToWorker(): void {
-    if (this.workerBusy) {
-      this.pendingMatrix = true;
-    } else {
-      this.worker.postMessage({
-        type: WorkerMessageType.UpdateMatrix,
-        data: this.interactionMatrix
-      });
+  /**
+   * Send interaction matrix to the active backend
+   */
+  private sendMatrixToBackend(): void {
+    if (this.backend === 'webgpu' && this.gpuEngine) {
+      this.gpuEngine.updateInteractionMatrix(this.interactionMatrix, this.config.particleTypes);
+      return;
+    }
+
+    if (this.worker) {
+      if (this.workerBusy) {
+        this.pendingMatrix = true;
+      } else {
+        this.worker.postMessage({
+          type: WorkerMessageType.UpdateMatrix,
+          data: this.interactionMatrix
+        });
+      }
     }
   }
 
   private sendAttractorsToWorker(): void {
+    // WebGPU doesn't support attractors yet, only worker
+    if (!this.worker) return;
+
     if (this.workerBusy) {
       this.pendingAttractors = true;
     } else {
@@ -505,6 +609,9 @@ class ParticleSimulation {
   }
 
   private sendObstaclesToWorker(): void {
+    // WebGPU doesn't support obstacles yet, only worker
+    if (!this.worker) return;
+
     if (this.workerBusy) {
       this.pendingObstacles = true;
     } else {
@@ -546,7 +653,7 @@ class ParticleSimulation {
       this.config.radiationEnabled = audio.high > 0.3;
     }
 
-    this.sendConfigToWorker();
+    this.sendConfigToBackend();
   }
 
   private animate = (): void => {
@@ -566,10 +673,30 @@ class ParticleSimulation {
       this.updateAudio();
     }
 
-    // Request update from worker
-    if (!this.workerBusy && this.particleData) {
-      this.workerBusy = true;
-      this.worker.postMessage({ type: WorkerMessageType.Update });
+    // Run physics on appropriate backend
+    if (this.backend === 'webgpu' && this.gpuEngine && this.particleData) {
+      // Update config and run GPU compute
+      this.gpuEngine.updateConfig(
+        getWorkerConfig(this.config),
+        this.mouseX,
+        this.mouseY
+      );
+      this.gpuEngine.step();
+
+      // Async read back particle data for rendering
+      if (!this.gpuReadPending) {
+        this.gpuReadPending = true;
+        this.gpuEngine.readParticles().then((data) => {
+          this.particleData = data;
+          this.gpuReadPending = false;
+        });
+      }
+    } else if (this.worker) {
+      // Request update from worker
+      if (!this.workerBusy && this.particleData) {
+        this.workerBusy = true;
+        this.worker.postMessage({ type: WorkerMessageType.Update });
+      }
     }
 
     // Update meshes
