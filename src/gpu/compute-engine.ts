@@ -98,6 +98,21 @@ export class WebGPUComputeEngine {
       code: PHYSICS_SHADER
     });
 
+    // Check for shader compilation errors
+    const compilationInfo = await shaderModule.getCompilationInfo();
+    for (const message of compilationInfo.messages) {
+      const msgType = message.type;
+      const logFn = msgType === 'error' ? console.error : console.warn;
+      logFn(`WGSL ${msgType}: ${message.message}`);
+      if (message.lineNum) {
+        logFn(`  at line ${message.lineNum}:${message.linePos}`);
+      }
+    }
+    if (compilationInfo.messages.some(m => m.type === 'error')) {
+      console.error('Shader compilation failed!');
+      return;
+    }
+
     const bindGroupLayout = this.device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },

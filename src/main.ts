@@ -675,19 +675,24 @@ class ParticleSimulation {
 
     // Run physics on appropriate backend
     if (this.backend === 'webgpu' && this.gpuEngine && this.particleData) {
-      // Update config and run GPU compute
-      this.gpuEngine.updateConfig(
-        getWorkerConfig(this.config),
-        this.mouseX,
-        this.mouseY
-      );
-      this.gpuEngine.step();
-
-      // Async read back particle data for rendering
+      // Only run step if we're not waiting for a readback
+      // This prevents race conditions with the buffer
       if (!this.gpuReadPending) {
+        // Update config and run GPU compute
+        this.gpuEngine.updateConfig(
+          getWorkerConfig(this.config),
+          this.mouseX,
+          this.mouseY
+        );
+        this.gpuEngine.step();
+
+        // Start async read back for next frame
         this.gpuReadPending = true;
         this.gpuEngine.readParticles().then((data) => {
           this.particleData = data;
+          this.gpuReadPending = false;
+        }).catch((err) => {
+          console.error('GPU readback error:', err);
           this.gpuReadPending = false;
         });
       }
