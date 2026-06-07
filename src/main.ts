@@ -80,6 +80,11 @@ class ParticleSimulation {
   private statsElement: HTMLElement | null = null;
   private backendElement: HTMLElement | null = null;
 
+  // Particle inspector (click to follow a particle)
+  private selectedParticleIndex: number | null = null;
+  private inspectorElement: HTMLElement | null = null;
+  private markerElement: HTMLElement | null = null;
+
   constructor() {
     // Configuration
     this.config = createDefaultConfig();
@@ -111,6 +116,7 @@ class ParticleSimulation {
     this.workerStatusElement = document.getElementById('worker-status')!;
     this.createStatsElement();
     this.createBackendElement();
+    this.createInspectorElements();
 
     // Events
     this.setupEventListeners();
@@ -250,6 +256,259 @@ class ParticleSimulation {
     document.body.appendChild(this.statsElement);
   }
 
+  /**
+   * Creates the DOM overlays for the particle inspector: a ring marker drawn
+   * over the selected particle and an info box that follows it.
+   */
+  private createInspectorElements(): void {
+    // Ring that highlights the selected particle
+    this.markerElement = document.createElement('div');
+    this.markerElement.id = 'particle-marker';
+    this.markerElement.style.cssText = `
+      position: absolute;
+      pointer-events: none;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      box-shadow: 0 0 8px rgba(255,255,255,0.9);
+      transform: translate(-50%, -50%);
+      display: none;
+      z-index: 10;
+    `;
+    document.body.appendChild(this.markerElement);
+
+    // Info box with the live parameters
+    this.inspectorElement = document.createElement('div');
+    this.inspectorElement.id = 'particle-inspector';
+    this.inspectorElement.style.cssText = `
+      position: absolute;
+      pointer-events: none;
+      color: #fff;
+      font-family: monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      background: rgba(0,0,0,0.8);
+      border: 1px solid rgba(255,255,255,0.25);
+      padding: 6px 8px;
+      border-radius: 4px;
+      white-space: nowrap;
+      display: none;
+      z-index: 11;
+    `;
+    document.body.appendChild(this.inspectorElement);
+  }
+
+  private hideInspector(): void {
+    if (this.markerElement) this.markerElement.style.display = 'none';
+    if (this.inspectorElement) this.inspectorElement.style.display = 'none';
+  }
+
+  /**
+   * Finds the nearest particle to a world-space point, within a pick radius.
+   * Returns the particle index (into particleData) or null if none is close.
+   */
+  private pickParticle(worldX: number, worldY: number): number | null {
+    if (!this.particleData) return null;
+
+    // Pick radius in world units: forgiving but scales with zoom
+    const pickRadius = Math.max(this.config.particleRadius * 2, 12 / this.config.zoom);
+    const pickRadiusSq = pickRadius * pickRadius;
+
+    const total = this.particleData.length / PARTICLE_STRIDE;
+    let best: number | null = null;
+    let bestDistSq = pickRadiusSq;
+
+    for (let i = 0; i < total; i++) {
+      const idx = i * PARTICLE_STRIDE;
+      const dx = this.particleData[idx + ParticleIndex.X] - worldX;
+      const dy = this.particleData[idx + ParticleIndex.Y] - worldY;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < bestDistSq) {
+        bestDistSq = distSq;
+        best = i;
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Computes the inter-particle forces acting on a single particle, mirroring
+   * the model in physics/forces.ts. Runs on the main thread for the selected
+   * particle only (O(n)), so it works for both Worker and WebGPU backends.
+   */
+  private computeParticleForces(index: number): {
+    neighbors: number;
+    contacts: number;
+    attractionMag: number;
+    repulsionMag: number;
+    netMag: number;
+    pressure: number;
+  } {
+    const data = this.particleData!;
+    const cfg = this.config;
+    const idx = index * PARTICLE_STRIDE;
+    const px = data[idx + ParticleIndex.X];
+    const py = data[idx + ParticleIndex.Y];
+    const pType = Math.round(data[idx + ParticleIndex.Type]);
+
+    const halfW = cfg.worldWidth / 2;
+    const halfH = cfg.worldHeight / 2;
+    const total = data.length / PARTICLE_STRIDE;
+
+    // Separate attraction / repulsion contributions to the acceleration
+    let attractAx = 0, attractAy = 0;
+    let repelAx = 0, repelAy = 0;
+    let pressure = 0; // accumulated collision push magnitude (compression)
+    let neighbors = 0;
+    let contacts = 0;
+
+    for (let j = 0; j < total; j++) {
+      if (j === index) continue;
+      const jdx = j * PARTICLE_STRIDE;
+
+      let dx = data[jdx + ParticleIndex.X] - px;
+      let dy = data[jdx + ParticleIndex.Y] - py;
+      const oType = Math.round(data[jdx + ParticleIndex.Type]);
+
+      if (cfg.wrapEdges) {
+        if (dx > halfW) dx -= cfg.worldWidth;
+        if (dx < -halfW) dx += cfg.worldWidth;
+        if (dy > halfH) dy -= cfg.worldHeight;
+        if (dy < -halfH) dy += cfg.worldHeight;
+      }
+
+      const distSq = dx * dx + dy * dy;
+      if (distSq > cfg.interactionRadius * cfg.interactionRadius) continue;
+      const dist = Math.sqrt(distSq);
+      if (dist < 1) continue;
+
+      neighbors++;
+      const nx = dx / dist;
+      const ny = dy / dist;
+      const interaction = this.interactionMatrix[pType]?.[oType] ?? 0;
+
+      // Physical collision (always repulsive) -> contributes to pressure
+      if (dist < cfg.minDistance) {
+        const ratio = cfg.minDistance / dist;
+        const pushForce = cfg.softness * (ratio - 1);
+        repelAx -= nx * pushForce;
+        repelAy -= ny * pushForce;
+        pressure += Math.abs(pushForce);
+        contacts++;
+      }
+
+      // Distance-based attraction / repulsion from the interaction matrix
+      if (dist < cfg.interactionRadius && dist >= cfg.minDistance) {
+        const normalizedDist =
+          (dist - cfg.minDistance) / (cfg.interactionRadius - cfg.minDistance);
+        if (interaction > 0) {
+          const f = cfg.attraction * interaction * (1 - normalizedDist);
+          attractAx += nx * f;
+          attractAy += ny * f;
+        } else if (interaction < 0) {
+          const f = cfg.repulsion * interaction * (1 - normalizedDist);
+          repelAx += nx * f; // f is negative -> points away (repulsion)
+          repelAy += ny * f;
+        }
+      }
+    }
+
+    const netAx = attractAx + repelAx;
+    const netAy = attractAy + repelAy;
+
+    return {
+      neighbors,
+      contacts,
+      attractionMag: Math.hypot(attractAx, attractAy),
+      repulsionMag: Math.hypot(repelAx, repelAy),
+      netMag: Math.hypot(netAx, netAy),
+      pressure
+    };
+  }
+
+  /**
+   * Positions the marker and info box over the currently selected particle and
+   * refreshes its live parameters. Called every frame.
+   */
+  private updateInspector(): void {
+    if (this.selectedParticleIndex === null || !this.particleData) {
+      this.hideInspector();
+      return;
+    }
+
+    const total = this.particleData.length / PARTICLE_STRIDE;
+    if (this.selectedParticleIndex >= total) {
+      // The followed particle no longer exists (e.g. after a reset)
+      this.selectedParticleIndex = null;
+      this.hideInspector();
+      return;
+    }
+
+    const idx = this.selectedParticleIndex * PARTICLE_STRIDE;
+    const x = this.particleData[idx + ParticleIndex.X];
+    const y = this.particleData[idx + ParticleIndex.Y];
+    const vx = this.particleData[idx + ParticleIndex.VX];
+    const vy = this.particleData[idx + ParticleIndex.VY];
+    const type = this.particleData[idx + ParticleIndex.Type];
+    const speed = Math.sqrt(vx * vx + vy * vy);
+
+    // World -> screen (CSS pixels). Inverse of the mousemove transform.
+    const zoom = this.config.zoom;
+    const sx = (x - this.config.panX) * zoom + window.innerWidth / 2;
+    const sy = -(y - this.config.panY) * zoom + window.innerHeight / 2;
+
+    const typeIndex = Math.min(Math.max(Math.round(type), 0), this.config.colors.length - 1);
+    const colorHex = '#' + (this.config.colors[typeIndex] ?? 0xffffff)
+      .toString(16)
+      .padStart(6, '0');
+
+    // Position and size the marker ring (a bit larger than the particle)
+    if (this.markerElement) {
+      const diameter = this.config.particleRadius * 2 * zoom + 10;
+      this.markerElement.style.display = 'block';
+      this.markerElement.style.left = `${sx}px`;
+      this.markerElement.style.top = `${sy}px`;
+      this.markerElement.style.width = `${diameter}px`;
+      this.markerElement.style.height = `${diameter}px`;
+      this.markerElement.style.borderColor = colorHex;
+    }
+
+    // Compute live inter-particle forces for the selected particle
+    const f = this.computeParticleForces(this.selectedParticleIndex);
+    const fmt = (v: number) => (Math.abs(v) >= 0.001 ? v.toFixed(3) : v.toExponential(1));
+
+    // Update the info box content
+    if (this.inspectorElement) {
+      this.inspectorElement.style.display = 'block';
+      this.inspectorElement.innerHTML = `
+        <div style="font-weight:bold;margin-bottom:2px;">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
+            background:${colorHex};margin-right:5px;"></span>Particle #${this.selectedParticleIndex} (type ${typeIndex})
+        </div>
+        <div>x: ${x.toFixed(1)}&nbsp;&nbsp;y: ${y.toFixed(1)}</div>
+        <div>vx: ${vx.toFixed(2)}&nbsp;&nbsp;vy: ${vy.toFixed(2)}</div>
+        <div>speed: ${speed.toFixed(2)}</div>
+        <hr style="border:none;border-top:1px solid rgba(255,255,255,0.2);margin:4px 0;">
+        <div>neighbors: ${f.neighbors}&nbsp;&nbsp;contacts: ${f.contacts}</div>
+        <div><span style="color:#6cf;">attraction:</span> ${fmt(f.attractionMag)}</div>
+        <div><span style="color:#f88;">repulsion:</span> ${fmt(f.repulsionMag)}</div>
+        <div><span style="color:#cfc;">net force:</span> ${fmt(f.netMag)}</div>
+        <div><span style="color:#fc6;">pressure:</span> ${fmt(f.pressure)}</div>
+      `;
+
+      // Offset the box from the particle, clamped to stay on screen
+      const offset = 16;
+      const boxWidth = this.inspectorElement.offsetWidth;
+      const boxHeight = this.inspectorElement.offsetHeight;
+      let bx = sx + offset;
+      let by = sy + offset;
+      if (bx + boxWidth > window.innerWidth) bx = sx - offset - boxWidth;
+      if (by + boxHeight > window.innerHeight) by = sy - offset - boxHeight;
+      this.inspectorElement.style.left = `${Math.max(0, bx)}px`;
+      this.inspectorElement.style.top = `${Math.max(0, by)}px`;
+    }
+  }
+
   private setupWorkerHandlers(): void {
     this.worker.onmessage = (e: MessageEvent<WorkerToMainMessage>) => {
       const message = e.data;
@@ -386,6 +645,17 @@ class ParticleSimulation {
       if (!this.particleData) return;
       if (this.config.mouseMode === MouseMode.Obstacle) return; // Handled by mouse up
 
+      // Inspect mode: pick the nearest particle and follow it (works on any backend)
+      if (this.config.mouseMode === MouseMode.Inspect) {
+        const zoom = this.config.zoom;
+        const wx = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
+        const wy = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
+        const picked = this.pickParticle(wx, wy);
+        this.selectedParticleIndex = picked;
+        if (picked === null) this.hideInspector();
+        return;
+      }
+
       // Adding particles at runtime only supported in worker mode
       if (this.backend !== 'worker' || !this.worker) return;
 
@@ -476,6 +746,9 @@ class ParticleSimulation {
         this.exporter.saveConfig(this.config, this.interactionMatrix);
       } else if (e.key === 'p' || e.key === 'P') {
         this.exporter.takeScreenshot(canvas);
+      } else if (e.key === 'Escape') {
+        this.selectedParticleIndex = null;
+        this.hideInspector();
       }
     });
   }
@@ -492,6 +765,10 @@ class ParticleSimulation {
   }
 
   private async initParticles(): Promise<void> {
+    // A reset rebuilds the array, so any followed particle is no longer valid
+    this.selectedParticleIndex = null;
+    this.hideInspector();
+
     this.interactionMatrix = createInteractionMatrix(this.config.particleTypes);
 
     const totalParticles = this.config.particlesPerType * this.config.particleTypes;
@@ -708,6 +985,9 @@ class ParticleSimulation {
     if (this.particleData) {
       this.renderer.updateParticles(this.particleData, this.config);
     }
+
+    // Update the particle inspector overlay (marker + info box follow the particle)
+    this.updateInspector();
 
     // Update stats display
     this.renderer.updateStats(this.stats, this.config);

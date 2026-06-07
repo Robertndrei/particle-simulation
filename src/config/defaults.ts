@@ -101,7 +101,7 @@ export function createDefaultConfig(): SimulationConfig {
     velocityColorScale: 1.0,
 
     // Mouse
-    mouseMode: MouseMode.None,
+    mouseMode: MouseMode.Inspect,
     mouseRadius: 150,
     mouseStrength: 2,
     spawnType: 0,

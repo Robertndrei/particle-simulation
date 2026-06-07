@@ -7,7 +7,8 @@ export enum MouseMode {
   Attract = 'attract',
   Vortex = 'vortex',
   Spawn = 'spawn',
-  Obstacle = 'obstacle'
+  Obstacle = 'obstacle',
+  Inspect = 'inspect'
 }
 
 /**
