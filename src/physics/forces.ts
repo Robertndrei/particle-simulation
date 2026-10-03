@@ -2,6 +2,9 @@ import type { WorkerConfig, InteractionMatrix, Attractor, Obstacle, SimulationSt
 import { PARTICLE_STRIDE, ParticleIndex, MouseMode, AttractorType } from '../types';
 import { SpatialHash } from './spatial-hash';
 
+/** Radius inside which the central pull stops growing (avoids a singularity) */
+const CENTRAL_SOFTENING = 30;
+
 /**
  * Dynamic wind system
  */
@@ -257,6 +260,16 @@ export class PhysicsEngine {
     if (config.gravityEnabled) {
       vx += config.gravityX;
       vy += config.gravityY;
+    }
+
+    // Pull toward the world centre, g / r (flat rotation curve)
+    if (config.centralGravity > 0) {
+      const r = Math.sqrt(px * px + py * py);
+      if (r > 1e-3) {
+        const pull = config.centralGravity / Math.max(r, CENTRAL_SOFTENING) / r;
+        vx -= px * pull;
+        vy -= py * pull;
+      }
     }
 
     // Apply fixed attractors/repulsors/vortices

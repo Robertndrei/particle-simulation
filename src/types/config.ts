@@ -1,4 +1,7 @@
 import { MouseMode, ColorMode, PresetName } from './enums';
+
+/** Random cloud, rotating spiral disk, or one rotating ring per species */
+export type InitialLayout = 'random' | 'disk' | 'rings';
 import type { Attractor, Obstacle } from './particle';
 
 /**
@@ -30,6 +33,8 @@ export interface SimulationConfig {
   gravityEnabled: boolean;
   gravityX: number;
   gravityY: number;
+  /** Pull toward the world centre (flat rotation curve: orbit speed = sqrt) */
+  centralGravity: number;
 
   // Effects
   noiseEnabled: boolean;
@@ -60,6 +65,9 @@ export interface SimulationConfig {
   mouseRadius: number;
   mouseStrength: number;
   spawnType: number;
+
+  /** How particles are placed on reset */
+  initialLayout: InitialLayout;
 
   // World (width/height are derived from the particle count on reset)
   worldWidth: number;
@@ -126,6 +134,7 @@ export interface WorkerConfig {
   gravityEnabled: boolean;
   gravityX: number;
   gravityY: number;
+  centralGravity: number;
   noiseEnabled: boolean;
   noiseStrength: number;
   trailsEnabled: boolean;
@@ -166,6 +175,7 @@ export function getWorkerConfig(config: SimulationConfig): WorkerConfig {
     gravityEnabled: config.gravityEnabled,
     gravityX: config.gravityX,
     gravityY: config.gravityY,
+    centralGravity: config.centralGravity,
     noiseEnabled: config.noiseEnabled,
     noiseStrength: config.noiseStrength,
     trailsEnabled: config.trailsEnabled,

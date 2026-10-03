@@ -11,6 +11,9 @@ import { PARTICLE_RENDER_SHADER, FULLSCREEN_SHADER, VIEW_SIZE_BYTES } from './sh
 const BACKGROUND = { r: 0x11 / 255, g: 0x11 / 255, b: 0x11 / 255, a: 1 };
 const MIN_RADIUS_PX = 1.25;
 const MAX_PIXEL_RATIO = 2;
+// Float trails: with 8 bits a slow fade (alpha 0.02) rounds back to the same
+// value near the background and leaves a permanent grey haze
+const TRAIL_FORMAT: GPUTextureFormat = 'rgba16float';
 
 export class WebGPUParticleRenderer {
   private device: GPUDevice;
@@ -19,6 +22,8 @@ export class WebGPUParticleRenderer {
   private format: GPUTextureFormat;
 
   private particlePipeline: GPURenderPipeline;
+  private trailParticlePipeline: GPURenderPipeline;
+  private particleLayout: GPUBindGroupLayout;
   private fadePipeline: GPURenderPipeline;
   private blitPipeline: GPURenderPipeline;
   private viewBuffer: GPUBuffer;
@@ -58,15 +63,23 @@ export class WebGPUParticleRenderer {
     const particleModule = device.createShaderModule({ label: 'particles', code: PARTICLE_RENDER_SHADER });
     const fullscreenModule = device.createShaderModule({ label: 'fullscreen', code: FULLSCREEN_SHADER });
 
-    this.particlePipeline = device.createRenderPipeline({
-      label: 'particles',
-      layout: 'auto',
+    // Shared layout so one bind group works for both target formats
+    this.particleLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }
+      ]
+    });
+    const particleLayout = device.createPipelineLayout({ bindGroupLayouts: [this.particleLayout] });
+    const particlePipeline = (format: GPUTextureFormat) => device.createRenderPipeline({
+      label: `particles-${format}`,
+      layout: particleLayout,
       vertex: { module: particleModule, entryPoint: 'vs' },
       fragment: {
         module: particleModule,
         entryPoint: 'fs',
         targets: [{
-          format: this.format,
+          format,
           blend: {
             color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
             alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }
@@ -75,6 +88,8 @@ export class WebGPUParticleRenderer {
       },
       primitive: { topology: 'triangle-list' }
     });
+    this.particlePipeline = particlePipeline(this.format);
+    this.trailParticlePipeline = particlePipeline(TRAIL_FORMAT);
 
     this.fadePipeline = device.createRenderPipeline({
       label: 'trail-fade',
@@ -84,7 +99,7 @@ export class WebGPUParticleRenderer {
         module: fullscreenModule,
         entryPoint: 'fade',
         targets: [{
-          format: this.format,
+          format: TRAIL_FORMAT,
           blend: {
             color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
             alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }
@@ -139,7 +154,7 @@ export class WebGPUParticleRenderer {
     if (!this.trailTexture) {
       this.trailTexture = this.device.createTexture({
         size: [this.canvas.width, this.canvas.height],
-        format: this.format,
+        format: TRAIL_FORMAT,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
       });
       this.trailBlitGroup = this.device.createBindGroup({
@@ -158,7 +173,7 @@ export class WebGPUParticleRenderer {
     let group = this.particleGroups.get(buffer);
     if (!group) {
       group = this.device.createBindGroup({
-        layout: this.particlePipeline.getBindGroupLayout(0),
+        layout: this.particleLayout,
         entries: [
           { binding: 0, resource: { buffer } },
           { binding: 1, resource: { buffer: this.viewBuffer } }
@@ -205,9 +220,9 @@ export class WebGPUParticleRenderer {
     const encoder = this.device.createCommandEncoder();
     const canvasView = this.context.getCurrentTexture().createView();
 
-    const drawParticles = (pass: GPURenderPassEncoder) => {
+    const drawParticles = (pass: GPURenderPassEncoder, pipeline: GPURenderPipeline) => {
       if (!particles || count === 0) return;
-      pass.setPipeline(this.particlePipeline);
+      pass.setPipeline(pipeline);
       pass.setBindGroup(0, this.particleGroup(particles));
       pass.draw(6, count);
     };
@@ -233,7 +248,7 @@ export class WebGPUParticleRenderer {
       pass.setPipeline(this.fadePipeline);
       pass.setBindGroup(0, this.fadeGroup);
       pass.draw(3);
-      drawParticles(pass);
+      drawParticles(pass, this.trailParticlePipeline);
       pass.end();
 
       const blit = encoder.beginRenderPass({
@@ -248,7 +263,7 @@ export class WebGPUParticleRenderer {
       const pass = encoder.beginRenderPass({
         colorAttachments: [{ view: canvasView, loadOp: 'clear', clearValue: BACKGROUND, storeOp: 'store' }]
       });
-      drawParticles(pass);
+      drawParticles(pass, this.particlePipeline);
       pass.end();
     }
 

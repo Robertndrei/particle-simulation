@@ -232,6 +232,7 @@ export class WebGPUComputeEngine {
     f[26] = config.mouseRadius;
     f[27] = config.mouseStrength;
     u[28] = (Math.random() * 0xffffffff) >>> 0;
+    f[29] = config.centralGravity;
 
     this.device.queue.writeBuffer(this.buffers.params, 0, this.paramsData);
   }

@@ -41,6 +41,8 @@ const WORLD_SPACING = 1.5;
 // Zoom is effectively unbounded; these only keep floats finite
 const MIN_ZOOM = 1e-9;
 const MAX_ZOOM = 1000;
+// Must match CENTRAL_SOFTENING in gpu/shaders.ts and physics/forces.ts
+const CENTRAL_SOFTENING = 30;
 // Pointer travel (px) before a press becomes a pan instead of a click
 const DRAG_THRESHOLD = 4;
 
@@ -904,20 +906,7 @@ class ParticleSimulation {
     const initialData = new Float32Array(totalParticles * PARTICLE_STRIDE);
     this.particleData = initialData;
 
-    let particleIndex = 0;
-    for (let type = 0; type < this.config.particleTypes; type++) {
-      for (let i = 0; i < this.config.particlesPerType; i++) {
-        const idx = particleIndex * PARTICLE_STRIDE;
-        this.particleData[idx + ParticleIndex.X] =
-          (Math.random() - 0.5) * this.config.worldWidth * 0.9;
-        this.particleData[idx + ParticleIndex.Y] =
-          (Math.random() - 0.5) * this.config.worldHeight * 0.9;
-        this.particleData[idx + ParticleIndex.VX] = 0;
-        this.particleData[idx + ParticleIndex.VY] = 0;
-        this.particleData[idx + ParticleIndex.Type] = type;
-        particleIndex++;
-      }
-    }
+    this.seedParticles(initialData);
 
     // Initialize renderer
     this.renderer.initializeParticles(this.config);
@@ -950,6 +939,71 @@ class ParticleSimulation {
 
     this.countElement.textContent = totalParticles.toLocaleString('es-ES');
     this.gui.updateInteractionControls(this.config, this.interactionMatrix);
+  }
+
+  /**
+   * Places particles for the configured initial layout. Disk and rings start
+   * with the circular orbit speed for the central pull, so they rotate
+   * instead of collapsing.
+   */
+  private seedParticles(data: Float32Array): void {
+    const cfg = this.config;
+    const types = cfg.particleTypes;
+    const radius = 0.4 * Math.min(cfg.worldWidth, cfg.worldHeight);
+    const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
+
+    let index = 0;
+    for (let type = 0; type < types; type++) {
+      for (let i = 0; i < cfg.particlesPerType; i++) {
+        const idx = index++ * PARTICLE_STRIDE;
+        let x: number;
+        let y: number;
+        let direction = 1;
+
+        if (cfg.initialLayout === 'disk') {
+          const core = 0.12 * radius;
+          if (Math.random() < 0.06) {
+            // Central bulge (kept sparse: a packed core explodes on collisions)
+            const r = core * Math.sqrt(Math.random());
+            const a = Math.random() * Math.PI * 2;
+            x = Math.cos(a) * r;
+            y = Math.sin(a) * r;
+          } else {
+            // One trailing logarithmic spiral arm per species
+            const r = core + (radius - core) * Math.sqrt(Math.random());
+            const a = (type / types) * Math.PI * 2 - 2.4 * Math.log(r / core) + gauss() * 0.25;
+            x = Math.cos(a) * r;
+            y = Math.sin(a) * r;
+          }
+        } else if (cfg.initialLayout === 'rings') {
+          // One ring per species, inner to outer, alternating direction
+          const r = radius * (0.25 + 0.75 * (types > 1 ? type / (types - 1) : 0)) + gauss() * 0.03 * radius;
+          const a = Math.random() * Math.PI * 2;
+          x = Math.cos(a) * r;
+          y = Math.sin(a) * r;
+          direction = type % 2 === 0 ? 1 : -1;
+        } else {
+          x = (Math.random() - 0.5) * cfg.worldWidth * 0.9;
+          y = (Math.random() - 0.5) * cfg.worldHeight * 0.9;
+        }
+
+        let vx = 0;
+        let vy = 0;
+        const r = Math.hypot(x, y);
+        if (cfg.initialLayout !== 'random' && cfg.centralGravity > 0 && r > 1e-3) {
+          // Circular orbit: v^2 / r = g / max(r, softening), tangential, counter-clockwise
+          const speed = Math.sqrt(cfg.centralGravity * r / Math.max(r, CENTRAL_SOFTENING)) * direction;
+          vx = (-y / r) * speed;
+          vy = (x / r) * speed;
+        }
+
+        data[idx + ParticleIndex.X] = x;
+        data[idx + ParticleIndex.Y] = y;
+        data[idx + ParticleIndex.VX] = vx;
+        data[idx + ParticleIndex.VY] = vy;
+        data[idx + ParticleIndex.Type] = type;
+      }
+    }
   }
 
   private randomizeInteractions(): void {

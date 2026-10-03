@@ -2,7 +2,7 @@
 export { MouseMode, WorkerMessageType, ColorMode, AttractorType, PresetName } from './enums';
 
 // Config types
-export type { SimulationConfig, WorkerConfig } from './config';
+export type { SimulationConfig, WorkerConfig, InitialLayout } from './config';
 export { getWorkerConfig } from './config';
 
 // Particle types

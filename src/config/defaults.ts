@@ -59,6 +59,7 @@ export function createDefaultConfig(): SimulationConfig {
     gravityEnabled: false,
     gravityX: 0,
     gravityY: -0.1,
+    centralGravity: 0,
 
     // Optional effects
     noiseEnabled: false,
@@ -94,6 +95,7 @@ export function createDefaultConfig(): SimulationConfig {
     worldWidth: window.innerWidth,
     worldHeight: window.innerHeight,
     worldScale: 1,
+    initialLayout: 'random',
     wrapEdges: false,
 
     // Playback
@@ -203,30 +205,37 @@ export const PRESETS: Record<PresetName, SimulationPreset> = {
   },
   [PresetName.Galaxy]: {
     name: 'Galaxy',
-    description: 'Spiral galaxy formation',
+    description: 'Rotating disk whose arms wind into a spiral',
+    // Orbits need a central pull, starting tangential speed and no drag:
+    // with a flat rotation curve the inner disk turns faster and winds the arms
     config: {
-      particlesPerType: 500,
+      particlesPerType: 1500,
       particleTypes: 4,
-      attraction: 0.05,
-      repulsion: 0.01,
-      interactionRadius: 300,
-      minDistance: 20,
-      softness: 0.3,
-      drag: 0.02,
-      maxSpeed: 8,
-      gravityEnabled: false,
-      noiseEnabled: true,
-      noiseStrength: 0.05,
+      particleRadius: 2.5,
+      // Particles only collide: any mutual attraction beats the central pull
+      // at the rim and breaks the arms into clumps
+      attraction: 0,
+      repulsion: 0,
+      interactionRadius: 50,
+      minDistance: 2,
+      softness: 0.1,
+      drag: 0,
+      maxSpeed: 6,
+      interFriction: 0,
+      centralGravity: 8,
+      initialLayout: 'disk',
+      worldScale: 3,
       trailsEnabled: true,
-      trailLength: 0.95,
+      trailLength: 0.9,
       bloomEnabled: true,
       bloomStrength: 2.0
     },
+    // Same-species affinity, felt if "Ganas de perseguir" is raised
     matrix: [
-      [1, 0.5, 0.3, 0.1],
-      [0.5, 1, 0.5, 0.3],
-      [0.3, 0.5, 1, 0.5],
-      [0.1, 0.3, 0.5, 1]
+      [0.5, 0.1, 0, 0],
+      [0.1, 0.5, 0.1, 0],
+      [0, 0.1, 0.5, 0.1],
+      [0, 0, 0.1, 0.5]
     ]
   },
   [PresetName.Life]: {
@@ -348,28 +357,33 @@ export const PRESETS: Record<PresetName, SimulationPreset> = {
   },
   [PresetName.Orbits]: {
     name: 'Orbits',
-    description: 'Orbital mechanics',
+    description: 'One ring per species, alternating direction around the centre',
     config: {
-      particlesPerType: 300,
+      particlesPerType: 1200,
       particleTypes: 4,
-      attraction: 0.08,
+      particleRadius: 2.5,
+      attraction: 0.01,
       repulsion: 0.01,
-      interactionRadius: 400,
-      minDistance: 15,
-      softness: 0.2,
-      drag: 0.01,
-      maxSpeed: 12,
+      interactionRadius: 50,
+      minDistance: 8,
+      softness: 0.4,
+      drag: 0,
+      maxSpeed: 6,
+      interFriction: 0.1,
+      centralGravity: 5,
+      initialLayout: 'rings',
+      worldScale: 3,
       trailsEnabled: true,
-      trailLength: 0.98,
+      trailLength: 0.9,
       bloomEnabled: true,
-      bloomStrength: 2.5,
-      particleRadius: 3
+      bloomStrength: 2.5
     },
+    // Each ring holds together; rings ignore each other
     matrix: [
-      [0.2, 1, 0.8, 0.6],
-      [-0.3, 0.2, 1, 0.8],
-      [-0.5, -0.3, 0.2, 1],
-      [-0.7, -0.5, -0.3, 0.2]
+      [1, 0, 0, 0],
+      [0, 1, 0, 0],
+      [0, 0, 1, 0],
+      [0, 0, 0, 1]
     ]
   }
 };
@@ -382,9 +396,6 @@ export function getPreset(name: PresetName): SimulationPreset {
 }
 
 /**
- * Applies a preset to the current configuration
- */
-/**
  * Settings a preset may change. They return to their defaults before a preset
  * is applied, so nothing leaks from the previously applied preset.
  */
@@ -395,9 +406,13 @@ const PRESET_KEYS = [
   'noiseEnabled', 'noiseStrength', 'trailsEnabled', 'trailLength', 'radiationEnabled',
   'radiationRate', 'radiationSpeed', 'windEnabled', 'windStrength', 'windCount',
   'windChangeSpeed', 'bloomEnabled', 'bloomStrength', 'bloomRadius', 'bloomThreshold',
-  'connectionsEnabled', 'colorMode', 'velocityColorScale', 'wrapEdges', 'worldScale'
+  'connectionsEnabled', 'colorMode', 'velocityColorScale', 'wrapEdges', 'worldScale',
+  'centralGravity', 'initialLayout'
 ] as const satisfies readonly (keyof SimulationConfig)[];
 
+/**
+ * Applies a preset to the current configuration
+ */
 export function applyPresetToConfig(
   config: SimulationConfig,
   preset: SimulationPreset

@@ -8,13 +8,13 @@ export interface PresetInfo {
 /** Spanish names and one-line descriptions for the preset cards. */
 export const PRESET_INFO: Record<PresetName, PresetInfo> = {
   [PresetName.Default]: { name: 'Ecosistema', description: 'Siete especies con relaciones mezcladas' },
-  [PresetName.Galaxy]: { name: 'Galaxia', description: 'Brazos que giran con estelas' },
+  [PresetName.Galaxy]: { name: 'Galaxia', description: 'Un disco que gira y enrolla sus brazos' },
   [PresetName.Life]: { name: 'Vida', description: 'Grupos que se persiguen sin parar' },
   [PresetName.Fluid]: { name: 'Fluido', description: 'Un líquido que cae y salpica' },
   [PresetName.Swarm]: { name: 'Enjambre', description: 'Bandadas que vuelan juntas' },
   [PresetName.Crystals]: { name: 'Cristales', description: 'Redes ordenadas y rígidas' },
   [PresetName.Chaos]: { name: 'Caos', description: 'Mucha energía, nada se queda quieto' },
-  [PresetName.Orbits]: { name: 'Órbitas', description: 'Especies que giran unas en torno a otras' }
+  [PresetName.Orbits]: { name: 'Órbitas', description: 'Anillos que giran en sentidos opuestos' }
 };
 
 function rng(seed: number): () => number {

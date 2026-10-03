@@ -65,7 +65,7 @@ struct Params {
   mouseRadius: f32,
   mouseStrength: f32,
   seed: u32,
-  _pad0: u32,
+  centralGravity: f32,  // pull toward the origin, g / max(r, CENTRAL_SOFTENING)
   _pad1: u32,
   _pad2: u32,
 }
@@ -187,6 +187,8 @@ fn random(seed: u32, offset: u32) -> f32 {
   return hash(seed + offset * 0x9e3779b9u) * 2.0 - 1.0;
 }
 
+const CENTRAL_SOFTENING: f32 = 30.0;
+
 fn wrapCell(v: i32, n: i32) -> i32 {
   return ((v % n) + n) % n;
 }
@@ -303,6 +305,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (params.gravityEnabled != 0u) {
     p.vx += params.gravityX;
     p.vy += params.gravityY;
+  }
+
+  if (params.centralGravity > 0.0) {
+    let r = sqrt(p.x * p.x + p.y * p.y);
+    if (r > 1.0e-3) {
+      let pull = params.centralGravity / max(r, CENTRAL_SOFTENING) / r;
+      p.vx -= p.x * pull;
+      p.vy -= p.y * pull;
+    }
   }
 
   if (params.noiseEnabled != 0u) {

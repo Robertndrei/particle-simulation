@@ -1,5 +1,5 @@
 import './styles.css';
-import type { SimulationConfig, InteractionMatrix } from '../types';
+import type { SimulationConfig, InteractionMatrix, InitialLayout } from '../types';
 import { ColorMode, MouseMode, PresetName } from '../types';
 import type { Control } from './components';
 import {
@@ -408,7 +408,13 @@ export class GUIController {
           change();
         }
       }),
-      pad
+      pad,
+      slider({
+        label: 'Hacia el centro', min: 0, max: 10, step: 0.1,
+        get: () => config.centralGravity, set: v => { config.centralGravity = v; }, onInput: change,
+        ends: ['Nada', 'Mucho'],
+        hint: 'Atrae todo hacia el centro del mundo. Con viscosidad baja las partículas orbitan como en una galaxia.'
+      })
     );
 
     const extra = group('Efectos extra', 'Disponibles solo cuando la física corre en el procesador.', true);
@@ -471,6 +477,17 @@ export class GUIController {
         format: v => `×${formatNumber(v, 2)}`,
         ends: ['Apretado', 'Holgado'],
         hint: 'Crece solo con el número de partículas. Al soltar se reinicia la simulación.'
+      }),
+      segmented<InitialLayout>({
+        label: 'Al reiniciar, empiezan como',
+        choices: [
+          { value: 'random', label: 'Nube' },
+          { value: 'disk', label: 'Disco en espiral' },
+          { value: 'rings', label: 'Anillos' }
+        ],
+        get: () => config.initialLayout, set: v => { config.initialLayout = v; },
+        onChange: () => this.callbacks.onReset(),
+        hint: 'El disco y los anillos arrancan girando; necesitan algo de fuerza hacia el centro para mantenerse.'
       }),
       segmented<boolean>({
         label: 'Al llegar al borde',

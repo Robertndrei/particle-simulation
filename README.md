@@ -10,6 +10,7 @@ An interactive particle simulation demonstrating emergent behavior patterns. Bui
 
 - **WebGPU simulation and rendering for 100,000+ particles**: physics runs in compute shaders with a spatial grid built on the GPU, and particles are drawn straight from GPU memory (falls back to a Web Worker with up to 7,000 particles when WebGPU is unavailable)
 - **Infinite canvas**: zoom out without limit (mouse wheel, anchored at the cursor) and drag to pan; particles stay visible at any scale
+- **Orbits that hold**: an optional pull toward the centre (flat rotation curve) plus rotating start layouts (spiral disk, rings) power the *Galaxia* and *Órbitas* presets
 - **7 particle types by default** with a random interaction matrix, so structures emerge right away
 - **Real-time particle physics** with configurable attraction/repulsion forces
 - **Multi-type particle system** with customizable interaction matrices
@@ -60,8 +61,8 @@ bun run preview
 The interface is in Spanish and describes behaviour in plain language instead of parameter names.
 
 - **Especies**: preset cards with a drawn preview, population (total particles and number of species), species colours, and the **relationship grid**: each row is a species, each column the species it reacts to. Teal circles mean "chases", coral means "flees", and the circle size is the strength. Drag a cell up or down (or use the wheel or arrow keys) to change it. A sentence below the grid describes the cell you are editing.
-- **Física**: a live diagram of the force against distance, with sliders for personal space, reach, chase and flee strength, collision hardness, viscosity, speed, friction, agitation, and a direction pad for gravity
-- **Mundo**: world size, edge behaviour, particle size, colour by species or speed, trails
+- **Física**: a live diagram of the force against distance, with sliders for personal space, reach, chase and flee strength, collision hardness, viscosity, speed, friction, agitation, a direction pad for gravity and the pull toward the centre
+- **Mundo**: world size, start layout (cloud, spiral disk, rings), edge behaviour, particle size, colour by species or speed, trails
 - **Más**: photo, video, CSV export, saving and loading settings, microphone reaction, keyboard shortcuts
 
 Controls the WebGPU backend does not support (bloom, connections, heatmap, stats, radiation, wind, walls, attractors) only appear when the simulation runs on the CPU worker.
