@@ -18,22 +18,6 @@ export const DEFAULT_COLORS: readonly number[] = [
 ] as const;
 
 /**
- * Color names for the GUI
- */
-export const COLOR_NAMES: readonly string[] = [
-  'Red',
-  'Green',
-  'Blue',
-  'Yellow',
-  'Magenta',
-  'Cyan',
-  'Orange',
-  'Purple',
-  'Lime',
-  'Pink'
-] as const;
-
-/**
  * Velocity color gradient (blue -> green -> yellow -> red)
  */
 export const VELOCITY_COLORS: readonly number[] = [
@@ -51,8 +35,8 @@ export const VELOCITY_COLORS: readonly number[] = [
 export function createDefaultConfig(): SimulationConfig {
   return {
     // Particles
-    particlesPerType: 1000,
-    particleTypes: 2,
+    particlesPerType: 4000,
+    particleTypes: 7,
     particleRadius: 4,
     particleSizeByVelocity: false,
     particleSizeMultiplier: 1.5,
@@ -109,7 +93,11 @@ export function createDefaultConfig(): SimulationConfig {
     // World
     worldWidth: window.innerWidth,
     worldHeight: window.innerHeight,
+    worldScale: 1,
     wrapEdges: false,
+
+    // Playback
+    paused: false,
 
     // Camera
     zoom: 1,
@@ -166,6 +154,24 @@ export function createInteractionMatrix(particleTypes: number): InteractionMatri
 }
 
 /**
+ * Resizes a matrix to a new type count, keeping existing values.
+ * New types attract themselves and ignore the rest.
+ */
+export function resizeInteractionMatrix(
+  matrix: InteractionMatrix,
+  particleTypes: number
+): InteractionMatrix {
+  const resized = createInteractionMatrix(particleTypes);
+  for (let i = 0; i < particleTypes; i++) {
+    for (let j = 0; j < particleTypes; j++) {
+      const value = matrix[i]?.[j];
+      if (value !== undefined) resized[i][j] = value;
+    }
+  }
+  return resized;
+}
+
+/**
  * Generates a random interaction matrix
  */
 export function randomizeInteractionMatrix(matrix: InteractionMatrix): void {
@@ -184,8 +190,8 @@ export const PRESETS: Record<PresetName, SimulationPreset> = {
     name: 'Default',
     description: 'Basic particle simulation',
     config: {
-      particlesPerType: 1000,
-      particleTypes: 2,
+      particlesPerType: 4000,
+      particleTypes: 7,
       attraction: 0.03,
       repulsion: 0.03,
       interactionRadius: 200,
@@ -266,7 +272,8 @@ export const PRESETS: Record<PresetName, SimulationPreset> = {
       gravityY: -0.15,
       colorMode: ColorMode.Velocity,
       velocityColorScale: 0.5
-    }
+    },
+    matrix: [[1]]
   },
   [PresetName.Swarm]: {
     name: 'Swarm',
@@ -377,10 +384,27 @@ export function getPreset(name: PresetName): SimulationPreset {
 /**
  * Applies a preset to the current configuration
  */
+/**
+ * Settings a preset may change. They return to their defaults before a preset
+ * is applied, so nothing leaks from the previously applied preset.
+ */
+const PRESET_KEYS = [
+  'particlesPerType', 'particleTypes', 'particleRadius', 'particleSizeByVelocity',
+  'particleSizeMultiplier', 'attraction', 'repulsion', 'interactionRadius', 'minDistance',
+  'softness', 'drag', 'maxSpeed', 'interFriction', 'gravityEnabled', 'gravityX', 'gravityY',
+  'noiseEnabled', 'noiseStrength', 'trailsEnabled', 'trailLength', 'radiationEnabled',
+  'radiationRate', 'radiationSpeed', 'windEnabled', 'windStrength', 'windCount',
+  'windChangeSpeed', 'bloomEnabled', 'bloomStrength', 'bloomRadius', 'bloomThreshold',
+  'connectionsEnabled', 'colorMode', 'velocityColorScale', 'wrapEdges', 'worldScale'
+] as const satisfies readonly (keyof SimulationConfig)[];
+
 export function applyPresetToConfig(
   config: SimulationConfig,
   preset: SimulationPreset
 ): void {
+  const defaults = createDefaultConfig();
+  const target = config as unknown as Record<string, unknown>;
+  for (const key of PRESET_KEYS) target[key] = defaults[key];
   Object.assign(config, preset.config);
 }
 

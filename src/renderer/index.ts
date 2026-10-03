@@ -23,6 +23,9 @@ export class Renderer {
   private energyGraph: EnergyGraph;
   private attractorRenderer: AttractorRenderer;
   private backgroundColor = 0x111111;
+  // When true, particles are drawn by the WebGPU renderer underneath and this
+  // canvas is a transparent overlay (attractors, obstacles)
+  private overlayMode = false;
 
   // For zoom and pan
   private baseZoom = 1;
@@ -49,8 +52,11 @@ export class Renderer {
     // WebGL renderer
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
+      alpha: true,
       preserveDrawingBuffer: true
     });
+    this.renderer.domElement.style.position = 'relative';
+    this.renderer.domElement.style.zIndex = '1';
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.autoClear = false;
@@ -94,9 +100,23 @@ export class Renderer {
   }
 
   /**
+   * Switches to a transparent overlay above the WebGPU particle canvas.
+   * Particle meshes, bloom and trails are then handled by the GPU renderer.
+   */
+  setOverlayMode(enabled: boolean): void {
+    this.overlayMode = enabled;
+    if (enabled) {
+      this.particleRenderer.dispose();
+      this.scene.background = null;
+      this.renderer.setClearColor(0x000000, 0);
+    }
+  }
+
+  /**
    * Initializes particles
    */
   initializeParticles(config: SimulationConfig): void {
+    if (this.overlayMode) return;
     this.particleRenderer.initialize(config);
 
     // Initialize bloom if enabled
@@ -148,6 +168,14 @@ export class Renderer {
   }
 
   /**
+   * Updates only attractors and obstacles (overlay mode: no CPU particle data)
+   */
+  updateOverlays(config: SimulationConfig): void {
+    this.attractorRenderer.updateAttractors(config.attractors);
+    this.attractorRenderer.updateObstacles(config.obstacles);
+  }
+
+  /**
    * Updates simulation statistics display
    */
   updateStats(stats: SimulationStats, config: SimulationConfig): void {
@@ -185,6 +213,12 @@ export class Renderer {
   render(config: SimulationConfig): void {
     // Update camera for zoom/pan
     this.updateCamera(config);
+
+    if (this.overlayMode) {
+      this.renderer.clear(true, true, true);
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
 
     // Update bloom parameters if enabled
     if (config.bloomEnabled) {

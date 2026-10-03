@@ -61,10 +61,14 @@ export interface SimulationConfig {
   mouseStrength: number;
   spawnType: number;
 
-  // World
+  // World (width/height are derived from the particle count on reset)
   worldWidth: number;
   worldHeight: number;
+  worldScale: number;
   wrapEdges: boolean;
+
+  // Playback
+  paused: boolean;
 
   // Camera
   zoom: number;

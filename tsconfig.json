@@ -14,7 +14,7 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
-    "types": ["bun-types"],
+    "types": ["bun-types", "@webgpu/types"],
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noImplicitReturns": true,

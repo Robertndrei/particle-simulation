@@ -18,18 +18,31 @@ import type {
 import {
   createDefaultConfig,
   createInteractionMatrix,
+  resizeInteractionMatrix,
   randomizeInteractionMatrix,
   getPreset,
   applyPresetToConfig
 } from './config/defaults';
 import { Renderer } from './renderer';
-import { GUIController } from './gui/controls';
+import { GUIController, MAX_TOTAL_PARTICLES } from './gui/controls';
+import { speciesName, hexColor } from './gui/matrix-editor';
+import { formatNumber } from './gui/components';
 import { AudioAnalyzer } from './audio/analyzer';
 import { Exporter } from './utils/exporter';
-import { detectWebGPU, WebGPUComputeEngine } from './gpu';
+import { detectWebGPU, WebGPUComputeEngine, WebGPUParticleRenderer } from './gpu';
 import type { WebGPUCapabilities } from './gpu';
 
 type SimulationBackend = 'webgpu' | 'worker';
+
+// The CPU worker cannot keep up beyond this; WebGPU handles 100k+
+const WORKER_MAX_PARTICLES = 7000;
+// Initial spacing between particles, in multiples of minDistance
+const WORLD_SPACING = 1.5;
+// Zoom is effectively unbounded; these only keep floats finite
+const MIN_ZOOM = 1e-9;
+const MAX_ZOOM = 1000;
+// Pointer travel (px) before a press becomes a pan instead of a click
+const DRAG_THRESHOLD = 4;
 
 /**
  * Main particle simulation application with all features
@@ -55,7 +68,16 @@ class ParticleSimulation {
   private backend: SimulationBackend = 'worker';
   private webgpuCapabilities: WebGPUCapabilities | null = null;
   private gpuEngine: WebGPUComputeEngine | null = null;
+  private gpuRenderer: WebGPUParticleRenderer | null = null;
   private gpuReadPending = false;
+  // World point to pick once the next GPU readback lands (inspect mode)
+  private pendingPick: { x: number; y: number } | null = null;
+
+  // Camera panning
+  private pointerClientX = 0;
+  private pointerClientY = 0;
+  private panPointer: { x: number; y: number; moved: boolean } | null = null;
+  private suppressClick = false;
 
   // New systems
   private audioAnalyzer: AudioAnalyzer;
@@ -78,7 +100,6 @@ class ParticleSimulation {
   private countElement: HTMLElement;
   private workerStatusElement: HTMLElement;
   private statsElement: HTMLElement | null = null;
-  private backendElement: HTMLElement | null = null;
 
   // Particle inspector (click to follow a particle)
   private selectedParticleIndex: number | null = null;
@@ -90,8 +111,10 @@ class ParticleSimulation {
     this.config = createDefaultConfig();
     this.setupConfigCallbacks();
 
-    // Initialize interaction matrix BEFORE the GUI
+    // Initialize interaction matrix BEFORE the GUI. Random by default so the
+    // types form emergent structures instead of isolated same-type blobs
     this.interactionMatrix = createInteractionMatrix(this.config.particleTypes);
+    randomizeInteractionMatrix(this.interactionMatrix);
 
     // Initialize subsystems
     this.audioAnalyzer = new AudioAnalyzer();
@@ -107,7 +130,13 @@ class ParticleSimulation {
       onMatrixChange: () => this.sendMatrixToBackend(),
       onReset: () => this.initParticles(),
       onAttractorsChange: () => this.sendAttractorsToWorker(),
-      onObstaclesChange: () => this.sendObstaclesToWorker()
+      onObstaclesChange: () => this.sendObstaclesToWorker(),
+      onFitView: () => this.fitView(),
+      onZoomBy: (factor) => this.zoomAt(window.innerWidth / 2, window.innerHeight / 2, factor),
+      // WebGPU reads colours and size every frame; the CPU renderer bakes them into meshes
+      onAppearanceChange: () => {
+        if (this.backend === 'worker') this.renderer.initializeParticles(this.config);
+      }
     });
 
     // DOM elements
@@ -115,7 +144,6 @@ class ParticleSimulation {
     this.countElement = document.getElementById('count')!;
     this.workerStatusElement = document.getElementById('worker-status')!;
     this.createStatsElement();
-    this.createBackendElement();
     this.createInspectorElements();
 
     // Events
@@ -136,16 +164,19 @@ class ParticleSimulation {
     this.webgpuCapabilities = await detectWebGPU();
 
     if (this.webgpuCapabilities.supported && this.webgpuCapabilities.device) {
+      const device = this.webgpuCapabilities.device;
       this.backend = 'webgpu';
-      this.gpuEngine = new WebGPUComputeEngine(this.webgpuCapabilities.device);
-      this.updateBackendDisplay();
-      console.log('Using WebGPU compute backend');
+      this.gpuEngine = new WebGPUComputeEngine(device);
+      this.gpuRenderer = new WebGPUParticleRenderer(device);
+      document.body.insertBefore(this.gpuRenderer.getDomElement(), document.body.firstChild);
+      this.renderer.setOverlayMode(true);
+      console.log('Using WebGPU compute + render backend');
     } else {
       this.backend = 'worker';
       this.initWorker();
-      this.updateBackendDisplay();
       console.log('Using Web Worker backend');
     }
+    this.gui.setBackend(this.backend);
 
     // Start simulation
     this.initParticles();
@@ -158,35 +189,6 @@ class ParticleSimulation {
       { type: 'module' }
     );
     this.setupWorkerHandlers();
-  }
-
-  private createBackendElement(): void {
-    this.backendElement = document.createElement('div');
-    this.backendElement.id = 'backend-status';
-    this.backendElement.style.cssText = `
-      position: absolute;
-      top: 30px;
-      right: 10px;
-      color: #fff;
-      font-family: monospace;
-      font-size: 11px;
-      background: rgba(0,0,0,0.7);
-      padding: 4px 8px;
-      border-radius: 4px;
-    `;
-    document.body.appendChild(this.backendElement);
-  }
-
-  private updateBackendDisplay(): void {
-    if (!this.backendElement) return;
-
-    if (this.backend === 'webgpu') {
-      this.backendElement.innerHTML = `<span style="color:#4f4">&#9679;</span> WebGPU`;
-      this.backendElement.title = 'Physics running on GPU';
-    } else {
-      this.backendElement.innerHTML = `<span style="color:#ff4">&#9679;</span> Worker`;
-      this.backendElement.title = 'Physics running on CPU (Web Worker)';
-    }
   }
 
   private setupConfigCallbacks(): void {
@@ -208,23 +210,33 @@ class ParticleSimulation {
       applyPresetToConfig(this.config, preset);
       if (preset.matrix) {
         this.interactionMatrix = preset.matrix.map(row => [...row]);
-        while (this.interactionMatrix.length < this.config.particleTypes) {
-          const row: number[] = [];
-          for (let j = 0; j < this.config.particleTypes; j++) {
-            row.push(this.interactionMatrix.length === j ? 1 : 0);
-          }
-          this.interactionMatrix.push(row);
-        }
-        this.sendMatrixToBackend();
+      } else {
+        // Presets without fixed relationships start from fresh random ones
+        this.interactionMatrix = createInteractionMatrix(this.config.particleTypes);
+        randomizeInteractionMatrix(this.interactionMatrix);
       }
+      // initParticles() resizes the matrix to the type count and uploads it
       this.gui.updateDisplay();
       this.initParticles();
     };
-    this.config.takeScreenshot = () => this.exporter.takeScreenshot(this.renderer.getDomElement());
-    this.config.startRecording = () => this.exporter.startRecording(this.renderer.getDomElement());
+    this.config.takeScreenshot = () => this.takeScreenshot();
+    // With WebGPU the particle canvas is recorded (overlays are not included)
+    this.config.startRecording = () => this.exporter.startRecording(
+      this.gpuRenderer ? this.gpuRenderer.getDomElement() : this.renderer.getDomElement()
+    );
     this.config.stopRecording = () => this.exporter.stopRecording();
-    this.config.exportData = () => {
-      if (this.particleData) {
+    this.config.exportData = async () => {
+      if (this.gpuEngine) {
+        // Fresh copy from the GPU (particleData is only kept current while
+        // inspecting). The staging buffer allows one read at a time.
+        while (this.gpuReadPending) await new Promise(r => setTimeout(r, 16));
+        this.gpuReadPending = true;
+        try {
+          this.exporter.exportParticleData(await this.gpuEngine.readParticles());
+        } finally {
+          this.gpuReadPending = false;
+        }
+      } else if (this.particleData) {
         this.exporter.exportParticleData(this.particleData);
       }
     };
@@ -243,8 +255,8 @@ class ParticleSimulation {
     this.statsElement.id = 'stats';
     this.statsElement.style.cssText = `
       position: absolute;
-      top: 10px;
-      left: 10px;
+      top: 60px;
+      left: 12px;
       color: #fff;
       font-family: monospace;
       font-size: 12px;
@@ -252,6 +264,7 @@ class ParticleSimulation {
       padding: 8px;
       border-radius: 4px;
       display: none;
+      z-index: 25;
     `;
     document.body.appendChild(this.statsElement);
   }
@@ -279,17 +292,16 @@ class ParticleSimulation {
     // Info box with the live parameters
     this.inspectorElement = document.createElement('div');
     this.inspectorElement.id = 'particle-inspector';
+    this.inspectorElement.className = 'ui';
     this.inspectorElement.style.cssText = `
       position: absolute;
       pointer-events: none;
-      color: #fff;
-      font-family: monospace;
-      font-size: 11px;
-      line-height: 1.5;
-      background: rgba(0,0,0,0.8);
-      border: 1px solid rgba(255,255,255,0.25);
-      padding: 6px 8px;
-      border-radius: 4px;
+      line-height: 1.55;
+      background: var(--ui-glass);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--ui-line);
+      padding: 10px 12px;
+      border-radius: 12px;
       white-space: nowrap;
       display: none;
       z-index: 11;
@@ -458,9 +470,7 @@ class ParticleSimulation {
     const sy = -(y - this.config.panY) * zoom + window.innerHeight / 2;
 
     const typeIndex = Math.min(Math.max(Math.round(type), 0), this.config.colors.length - 1);
-    const colorHex = '#' + (this.config.colors[typeIndex] ?? 0xffffff)
-      .toString(16)
-      .padStart(6, '0');
+    const colorHex = hexColor(this.config.colors[typeIndex]);
 
     // Position and size the marker ring (a bit larger than the particle)
     if (this.markerElement) {
@@ -475,25 +485,29 @@ class ParticleSimulation {
 
     // Compute live inter-particle forces for the selected particle
     const f = this.computeParticleForces(this.selectedParticleIndex);
-    const fmt = (v: number) => (Math.abs(v) >= 0.001 ? v.toFixed(3) : v.toExponential(1));
+    const fmt = (v: number) => (Math.abs(v) >= 0.001 ? formatNumber(v, 3) : '0');
 
     // Update the info box content
     if (this.inspectorElement) {
       this.inspectorElement.style.display = 'block';
+      const row = (label: string, value: string, color = 'var(--ui-muted)') =>
+        `<div style="display:flex;justify-content:space-between;gap:16px;">` +
+        `<span style="color:${color}">${label}</span><span>${value}</span></div>`;
       this.inspectorElement.innerHTML = `
-        <div style="font-weight:bold;margin-bottom:2px;">
-          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
-            background:${colorHex};margin-right:5px;"></span>Particle #${this.selectedParticleIndex} (type ${typeIndex})
+        <div style="font-weight:600;margin-bottom:4px;">
+          <span style="display:inline-block;width:9px;height:9px;border-radius:50%;
+            background:${colorHex};margin-right:6px;"></span>${speciesName(typeIndex)}
+          <span style="color:var(--ui-muted);font-weight:400;">n.º ${this.selectedParticleIndex}</span>
         </div>
-        <div>x: ${x.toFixed(1)}&nbsp;&nbsp;y: ${y.toFixed(1)}</div>
-        <div>vx: ${vx.toFixed(2)}&nbsp;&nbsp;vy: ${vy.toFixed(2)}</div>
-        <div>speed: ${speed.toFixed(2)}</div>
-        <hr style="border:none;border-top:1px solid rgba(255,255,255,0.2);margin:4px 0;">
-        <div>neighbors: ${f.neighbors}&nbsp;&nbsp;contacts: ${f.contacts}</div>
-        <div><span style="color:#6cf;">attraction:</span> ${fmt(f.attractionMag)}</div>
-        <div><span style="color:#f88;">repulsion:</span> ${fmt(f.repulsionMag)}</div>
-        <div><span style="color:#cfc;">net force:</span> ${fmt(f.netMag)}</div>
-        <div><span style="color:#fc6;">pressure:</span> ${fmt(f.pressure)}</div>
+        ${row('Posición', `${formatNumber(x)}; ${formatNumber(y)}`)}
+        ${row('Velocidad', formatNumber(speed, 2))}
+        ${row('Vecinas cerca', String(f.neighbors))}
+        ${row('Tocándola', String(f.contacts))}
+        <hr style="border:none;border-top:1px solid var(--ui-line);margin:6px 0;">
+        ${row('Le atraen', fmt(f.attractionMag), 'var(--ui-attract)')}
+        ${row('Le repelen', fmt(f.repulsionMag), 'var(--ui-repel)')}
+        ${row('Fuerza total', fmt(f.netMag), 'var(--ui-text)')}
+        ${row('Presión', fmt(f.pressure))}
       `;
 
       // Offset the box from the particle, clamped to stay on screen
@@ -503,14 +517,16 @@ class ParticleSimulation {
       let bx = sx + offset;
       let by = sy + offset;
       if (bx + boxWidth > window.innerWidth) bx = sx - offset - boxWidth;
-      if (by + boxHeight > window.innerHeight) by = sy - offset - boxHeight;
+      // Keep clear of the tool dock at the bottom
+      if (by + boxHeight > window.innerHeight - 120) by = sy - offset - boxHeight;
       this.inspectorElement.style.left = `${Math.max(0, bx)}px`;
       this.inspectorElement.style.top = `${Math.max(0, by)}px`;
     }
   }
 
   private setupWorkerHandlers(): void {
-    this.worker.onmessage = (e: MessageEvent<WorkerToMainMessage>) => {
+    const worker = this.worker!;
+    worker.onmessage = (e: MessageEvent<WorkerToMainMessage>) => {
       const message = e.data;
 
       if (message.type === WorkerMessageType.Ready) {
@@ -518,35 +534,33 @@ class ParticleSimulation {
         this.workerBusy = false;
       } else if (message.type === WorkerMessageType.Positions) {
         this.particleData = new Float32Array(message.particles);
-        this.countElement.textContent = String(
-          this.particleData.length / PARTICLE_STRIDE
-        );
+        this.countElement.textContent = (this.particleData.length / PARTICLE_STRIDE).toLocaleString('es-ES');
         this.workerBusy = false;
 
         // Send pending updates
         if (this.pendingConfig) {
-          this.worker.postMessage({
+          worker.postMessage({
             type: WorkerMessageType.UpdateConfig,
             data: getWorkerConfig(this.config)
           });
           this.pendingConfig = false;
         }
         if (this.pendingMatrix) {
-          this.worker.postMessage({
+          worker.postMessage({
             type: WorkerMessageType.UpdateMatrix,
             data: this.interactionMatrix
           });
           this.pendingMatrix = false;
         }
         if (this.pendingAttractors) {
-          this.worker.postMessage({
+          worker.postMessage({
             type: WorkerMessageType.UpdateAttractors,
             data: this.config.attractors
           });
           this.pendingAttractors = false;
         }
         if (this.pendingObstacles) {
-          this.worker.postMessage({
+          worker.postMessage({
             type: WorkerMessageType.UpdateObstacles,
             data: this.config.obstacles
           });
@@ -575,22 +589,116 @@ class ParticleSimulation {
     }
   }
 
+  /** Converts a client (CSS pixel) position to world coordinates. */
+  private screenToWorld(clientX: number, clientY: number): { x: number; y: number } {
+    const zoom = this.config.zoom;
+    return {
+      x: (clientX - window.innerWidth / 2) / zoom + this.config.panX,
+      y: -(clientY - window.innerHeight / 2) / zoom + this.config.panY
+    };
+  }
+
+  /** Re-derives the mouse world position (it moves when the camera does). */
+  private updateMouseWorld(): void {
+    const world = this.screenToWorld(this.pointerClientX, this.pointerClientY);
+    this.mouseX = world.x;
+    this.mouseY = world.y;
+  }
+
+  /** Zooms by `factor` keeping the world point under (clientX, clientY) fixed. */
+  private zoomAt(clientX: number, clientY: number, factor: number): void {
+    const before = this.screenToWorld(clientX, clientY);
+    this.config.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.config.zoom * factor));
+    const after = this.screenToWorld(clientX, clientY);
+    this.config.panX += before.x - after.x;
+    this.config.panY += before.y - after.y;
+    this.updateMouseWorld();
+    this.gpuRenderer?.clearTrails();
+  }
+
+  /** Frames the whole world in the part of the viewport the panel leaves free. */
+  private fitView(): void {
+    const inset = this.gui.getPanelInset();
+    const zoom = 0.95 * Math.min(
+      (window.innerWidth - inset) / this.config.worldWidth,
+      window.innerHeight / this.config.worldHeight
+    );
+    this.config.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+    // Shift the camera right so the world centres in the free area
+    this.config.panX = inset / 2 / this.config.zoom;
+    this.config.panY = 0;
+    this.gpuRenderer?.clearTrails();
+  }
+
+  /**
+   * Sizes the world from the particle count so density stays constant from a
+   * few thousand up to 100k+ particles (zoom out to see all of it).
+   */
+  private updateWorldSize(totalParticles: number): void {
+    const aspect = window.innerWidth / window.innerHeight;
+    const side = Math.sqrt(totalParticles) * this.config.minDistance * WORLD_SPACING * this.config.worldScale;
+    this.config.worldWidth = Math.max(window.innerWidth, side * Math.sqrt(aspect));
+    this.config.worldHeight = Math.max(window.innerHeight, side / Math.sqrt(aspect));
+  }
+
+  /** Middle button always pans; left button pans in modes where it has no drag action. */
+  private canPanWith(button: number): boolean {
+    if (button === 1) return true;
+    return button === 0 &&
+      (this.config.mouseMode === MouseMode.None || this.config.mouseMode === MouseMode.Inspect);
+  }
+
+  private spawnParticles(x: number, y: number, type: number, count: number, jitterVelocity: boolean): void {
+    const newData = new Float32Array(count * PARTICLE_STRIDE);
+    for (let i = 0; i < count; i++) {
+      const idx = i * PARTICLE_STRIDE;
+      newData[idx + ParticleIndex.X] = x + (Math.random() - 0.5) * 30;
+      newData[idx + ParticleIndex.Y] = y + (Math.random() - 0.5) * 30;
+      newData[idx + ParticleIndex.VX] = jitterVelocity ? (Math.random() - 0.5) * 2 : 0;
+      newData[idx + ParticleIndex.VY] = jitterVelocity ? (Math.random() - 0.5) * 2 : 0;
+      newData[idx + ParticleIndex.Type] = type;
+    }
+
+    if (this.backend === 'webgpu' && this.gpuEngine) {
+      this.gpuEngine.addParticles(newData);
+      this.countElement.textContent = this.gpuEngine.getParticleCount().toLocaleString('es-ES');
+    } else if (this.worker) {
+      this.worker.postMessage(
+        { type: WorkerMessageType.AddParticles, data: newData.buffer },
+        [newData.buffer]
+      );
+    }
+  }
+
   private setupEventListeners(): void {
-    // Resize
+    // Resize: only the viewport changes, the world keeps its size
     window.addEventListener('resize', () => {
-      this.config.worldWidth = window.innerWidth;
-      this.config.worldHeight = window.innerHeight;
       this.renderer.handleResize();
-      this.sendConfigToBackend();
+      this.gpuRenderer?.handleResize();
     });
 
     const canvas = this.renderer.getDomElement();
 
     // Mouse move
     canvas.addEventListener('mousemove', (e) => {
-      const zoom = this.config.zoom;
-      this.mouseX = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
-      this.mouseY = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
+      // Camera panning
+      if (this.panPointer) {
+        const dx = e.clientX - this.panPointer.x;
+        const dy = e.clientY - this.panPointer.y;
+        if (!this.panPointer.moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+          this.panPointer.moved = true;
+          canvas.style.cursor = 'grabbing';
+        }
+        if (this.panPointer.moved) {
+          this.config.panX -= (e.clientX - this.pointerClientX) / this.config.zoom;
+          this.config.panY += (e.clientY - this.pointerClientY) / this.config.zoom;
+          this.gpuRenderer?.clearTrails();
+        }
+      }
+
+      this.pointerClientX = e.clientX;
+      this.pointerClientY = e.clientY;
+      this.updateMouseWorld();
 
       // Update worker if using worker backend
       if (this.backend === 'worker' && this.worker) {
@@ -600,38 +708,45 @@ class ParticleSimulation {
         });
       }
       // WebGPU receives mouse position in updateConfig() each frame
-
-      // Drawing obstacle
-      if (this.isDrawingObstacle && this.config.mouseMode === MouseMode.Obstacle) {
-        // Preview handled in render
-      }
     });
 
     // Mouse down
     canvas.addEventListener('mousedown', (e) => {
-      if (this.config.mouseMode === MouseMode.Obstacle) {
+      // Middle-button drags and releases outside the canvas never fire a
+      // click, so a stale flag must not swallow this new interaction
+      this.suppressClick = false;
+      if (this.canPanWith(e.button)) {
+        if (e.button === 1) e.preventDefault(); // no autoscroll
+        this.panPointer = { x: e.clientX, y: e.clientY, moved: false };
+        return;
+      }
+      if (this.config.mouseMode === MouseMode.Obstacle && e.button === 0) {
         this.isDrawingObstacle = true;
-        const zoom = this.config.zoom;
-        this.obstacleStartX = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
-        this.obstacleStartY = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
+        const start = this.screenToWorld(e.clientX, e.clientY);
+        this.obstacleStartX = start.x;
+        this.obstacleStartY = start.y;
       }
     });
 
-    // Mouse up
-    canvas.addEventListener('mouseup', (e) => {
+    // Mouse up (on window so a pan ends even if released outside the canvas)
+    window.addEventListener('mouseup', (e) => {
+      if (this.panPointer) {
+        this.suppressClick = this.panPointer.moved && e.button === 0;
+        this.panPointer = null;
+        canvas.style.cursor = '';
+        return;
+      }
       if (this.isDrawingObstacle && this.config.mouseMode === MouseMode.Obstacle) {
         this.isDrawingObstacle = false;
-        const zoom = this.config.zoom;
-        const endX = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
-        const endY = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
+        const end = this.screenToWorld(e.clientX, e.clientY);
 
         // Create obstacle
         const obstacle: Obstacle = {
           id: `obs_${Date.now()}`,
           x1: this.obstacleStartX,
           y1: this.obstacleStartY,
-          x2: endX,
-          y2: endY,
+          x2: end.x,
+          y2: end.y,
           thickness: 20
         };
 
@@ -642,74 +757,46 @@ class ParticleSimulation {
 
     // Click
     canvas.addEventListener('click', (e) => {
-      if (!this.particleData) return;
+      // A drag that panned the camera is not a click
+      if (this.suppressClick) {
+        this.suppressClick = false;
+        return;
+      }
       if (this.config.mouseMode === MouseMode.Obstacle) return; // Handled by mouse up
+
+      const { x, y } = this.screenToWorld(e.clientX, e.clientY);
 
       // Inspect mode: pick the nearest particle and follow it (works on any backend)
       if (this.config.mouseMode === MouseMode.Inspect) {
-        const zoom = this.config.zoom;
-        const wx = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
-        const wy = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
-        const picked = this.pickParticle(wx, wy);
+        if (this.backend === 'webgpu') {
+          // GPU data lives on the GPU: pick once the next readback arrives
+          this.pendingPick = { x, y };
+          return;
+        }
+        if (!this.particleData) return;
+        const picked = this.pickParticle(x, y);
         this.selectedParticleIndex = picked;
         if (picked === null) this.hideInspector();
         return;
       }
 
-      // Adding particles at runtime only supported in worker mode
-      if (this.backend !== 'worker' || !this.worker) return;
-
-      const zoom = this.config.zoom;
-      const x = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
-      const y = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
-
       if (this.config.mouseMode === MouseMode.Spawn) {
         // Spawn particles of selected type
         const type = Math.min(this.config.spawnType, this.config.particleTypes - 1);
-        const newCount = 10;
-        const newData = new Float32Array(newCount * PARTICLE_STRIDE);
-
-        for (let i = 0; i < newCount; i++) {
-          const idx = i * PARTICLE_STRIDE;
-          newData[idx + ParticleIndex.X] = x + (Math.random() - 0.5) * 30;
-          newData[idx + ParticleIndex.Y] = y + (Math.random() - 0.5) * 30;
-          newData[idx + ParticleIndex.VX] = (Math.random() - 0.5) * 2;
-          newData[idx + ParticleIndex.VY] = (Math.random() - 0.5) * 2;
-          newData[idx + ParticleIndex.Type] = type;
-        }
-
-        this.worker.postMessage(
-          { type: WorkerMessageType.AddParticles, data: newData.buffer },
-          [newData.buffer]
-        );
+        this.spawnParticles(x, y, type, 10, true);
       } else if (this.config.mouseMode === MouseMode.None) {
         // Default: add random type particles
         const type = Math.floor(Math.random() * this.config.particleTypes);
-        const newCount = 5;
-        const newData = new Float32Array(newCount * PARTICLE_STRIDE);
-
-        for (let i = 0; i < newCount; i++) {
-          const idx = i * PARTICLE_STRIDE;
-          newData[idx + ParticleIndex.X] = x + (Math.random() - 0.5) * 30;
-          newData[idx + ParticleIndex.Y] = y + (Math.random() - 0.5) * 30;
-          newData[idx + ParticleIndex.VX] = 0;
-          newData[idx + ParticleIndex.VY] = 0;
-          newData[idx + ParticleIndex.Type] = type;
-        }
-
-        this.worker.postMessage(
-          { type: WorkerMessageType.AddParticles, data: newData.buffer },
-          [newData.buffer]
-        );
+        this.spawnParticles(x, y, type, 5, false);
       }
     });
 
     // Right click to add attractor/repulsor
     canvas.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      const zoom = this.config.zoom;
-      const x = (e.clientX - window.innerWidth / 2) / zoom + this.config.panX;
-      const y = -(e.clientY - window.innerHeight / 2) / zoom + this.config.panY;
+      // Attractors only act on the worker backend; don't draw inert ones
+      if (this.backend !== 'worker') return;
+      const { x, y } = this.screenToWorld(e.clientX, e.clientY);
 
       // Determine type based on shift/ctrl
       let attractorType = AttractorType.Attractor;
@@ -729,28 +816,54 @@ class ParticleSimulation {
       this.sendAttractorsToWorker();
     });
 
-    // Wheel for zoom
+    // Wheel: unbounded zoom anchored at the cursor (trackpad pinch included)
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      const zoomDelta = e.deltaY > 0 ? 0.9 : 1.1;
-      this.config.zoom = Math.max(0.1, Math.min(5, this.config.zoom * zoomDelta));
-      this.gui.updateDisplay();
+      const delta = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 16 : e.deltaY;
+      this.zoomAt(e.clientX, e.clientY, Math.exp(-delta * (e.ctrlKey ? 0.01 : 0.0015)));
     }, { passive: false });
 
     // Keyboard shortcuts
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'r' || e.key === 'R') {
-        this.initParticles();
-      } else if (e.key === 's' && e.ctrlKey) {
+      if (e.target instanceof HTMLInputElement) return; // typing in the GUI
+      if (e.key === 's' && e.ctrlKey) {
         e.preventDefault();
         this.exporter.saveConfig(this.config, this.interactionMatrix);
+        return;
+      }
+      // Leave browser shortcuts (Cmd+R, Ctrl+F, Ctrl+P...) alone
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === 'r' || e.key === 'R') {
+        this.initParticles();
       } else if (e.key === 'p' || e.key === 'P') {
-        this.exporter.takeScreenshot(canvas);
+        this.takeScreenshot();
+      } else if (e.key === 'f' || e.key === 'F' || e.key === 'Home') {
+        this.fitView();
       } else if (e.key === 'Escape') {
         this.selectedParticleIndex = null;
         this.hideInspector();
       }
     });
+  }
+
+  /**
+   * Screenshot. With WebGPU the particles are on their own canvas, so both
+   * layers are composited (rendered in the same task so the GPU image is valid).
+   */
+  private takeScreenshot(): void {
+    if (!this.gpuRenderer) {
+      this.exporter.takeScreenshot(this.renderer.getDomElement());
+      return;
+    }
+    this.renderGpuFrame();
+    const gpuCanvas = this.gpuRenderer.getDomElement();
+    const composite = document.createElement('canvas');
+    composite.width = gpuCanvas.width;
+    composite.height = gpuCanvas.height;
+    const ctx = composite.getContext('2d')!;
+    ctx.drawImage(gpuCanvas, 0, 0);
+    ctx.drawImage(this.renderer.getDomElement(), 0, 0, composite.width, composite.height);
+    this.exporter.takeScreenshot(composite);
   }
 
   private loadConfigFromUrl(): void {
@@ -769,10 +882,27 @@ class ParticleSimulation {
     this.selectedParticleIndex = null;
     this.hideInspector();
 
-    this.interactionMatrix = createInteractionMatrix(this.config.particleTypes);
+    // Values may come from a shared URL or file: keep them in the supported range
+    this.config.particleTypes = Math.min(10, Math.max(1, Math.round(Number(this.config.particleTypes) || 1)));
+    const maxPerType = Math.floor(MAX_TOTAL_PARTICLES / this.config.particleTypes);
+    this.config.particlesPerType = Math.min(maxPerType, Math.max(1, Math.round(Number(this.config.particlesPerType) || 1)));
+
+    // Keep the current forces; only adapt the matrix if the type count changed
+    this.interactionMatrix = resizeInteractionMatrix(this.interactionMatrix, this.config.particleTypes);
+
+    if (this.backend === 'worker') {
+      const maxPerType = Math.max(1, Math.floor(WORKER_MAX_PARTICLES / this.config.particleTypes));
+      if (this.config.particlesPerType > maxPerType) {
+        console.warn(`Worker backend: limiting to ${maxPerType} particles per type (WebGPU unavailable)`);
+        this.config.particlesPerType = maxPerType;
+      }
+    }
 
     const totalParticles = this.config.particlesPerType * this.config.particleTypes;
-    this.particleData = new Float32Array(totalParticles * PARTICLE_STRIDE);
+    this.updateWorldSize(totalParticles);
+    this.fitView();
+    const initialData = new Float32Array(totalParticles * PARTICLE_STRIDE);
+    this.particleData = initialData;
 
     let particleIndex = 0;
     for (let type = 0; type < this.config.particleTypes; type++) {
@@ -793,13 +923,12 @@ class ParticleSimulation {
     this.renderer.initializeParticles(this.config);
 
     if (this.backend === 'webgpu' && this.gpuEngine) {
-      // Initialize WebGPU compute engine
-      await this.gpuEngine.initialize(
-        totalParticles,
-        this.config.particleTypes,
-        this.particleData
-      );
+      // Initialize WebGPU compute engine, with headroom for spawned particles
+      const capacity = totalParticles + Math.max(5000, Math.ceil(totalParticles * 0.1));
+      this.particleData = null; // GPU owns the data; only read back on demand
+      await this.gpuEngine.initialize(totalParticles, capacity, initialData);
       this.gpuEngine.updateInteractionMatrix(this.interactionMatrix, this.config.particleTypes);
+      this.gpuRenderer?.clearTrails();
       this.workerStatusElement.textContent = 'GPU: active';
     } else if (this.worker) {
       // Send to worker
@@ -819,7 +948,7 @@ class ParticleSimulation {
       );
     }
 
-    this.countElement.textContent = String(totalParticles);
+    this.countElement.textContent = totalParticles.toLocaleString('es-ES');
     this.gui.updateInteractionControls(this.config, this.interactionMatrix);
   }
 
@@ -933,6 +1062,39 @@ class ParticleSimulation {
     this.sendConfigToBackend();
   }
 
+  private renderGpuFrame(): void {
+    if (!this.gpuRenderer || !this.gpuEngine) return;
+    this.gpuRenderer.render(
+      this.gpuEngine.getCurrentBuffer(),
+      this.gpuEngine.getParticleCount(),
+      this.config
+    );
+  }
+
+  /**
+   * Copies particles back to the CPU, but only while something needs them
+   * (following a particle or a pending pick). One read in flight at a time;
+   * the simulation keeps stepping meanwhile.
+   */
+  private requestGpuReadback(): void {
+    if (!this.gpuEngine || this.gpuReadPending) return;
+    if (this.selectedParticleIndex === null && !this.pendingPick) return;
+
+    this.gpuReadPending = true;
+    this.gpuEngine.readParticles().then((data) => {
+      this.particleData = data;
+      if (this.pendingPick) {
+        this.selectedParticleIndex = this.pickParticle(this.pendingPick.x, this.pendingPick.y);
+        this.pendingPick = null;
+        if (this.selectedParticleIndex === null) this.hideInspector();
+      }
+    }).catch((err) => {
+      console.error('GPU readback error:', err);
+    }).finally(() => {
+      this.gpuReadPending = false;
+    });
+  }
+
   private animate = (): void => {
     requestAnimationFrame(this.animate);
 
@@ -951,39 +1113,25 @@ class ParticleSimulation {
     }
 
     // Run physics on appropriate backend
-    if (this.backend === 'webgpu' && this.gpuEngine && this.particleData) {
-      // Only run step if we're not waiting for a readback
-      // This prevents race conditions with the buffer
-      if (!this.gpuReadPending) {
-        // Update config and run GPU compute
-        this.gpuEngine.updateConfig(
-          getWorkerConfig(this.config),
-          this.mouseX,
-          this.mouseY
-        );
+    if (this.backend === 'webgpu' && this.gpuEngine) {
+      if (!this.config.paused) {
+        this.gpuEngine.updateConfig(getWorkerConfig(this.config), this.mouseX, this.mouseY);
         this.gpuEngine.step();
-
-        // Start async read back for next frame
-        this.gpuReadPending = true;
-        this.gpuEngine.readParticles().then((data) => {
-          this.particleData = data;
-          this.gpuReadPending = false;
-        }).catch((err) => {
-          console.error('GPU readback error:', err);
-          this.gpuReadPending = false;
-        });
       }
+      this.requestGpuReadback();
+      this.renderGpuFrame();
+      this.renderer.updateOverlays(this.config);
     } else if (this.worker) {
       // Request update from worker
-      if (!this.workerBusy && this.particleData) {
+      if (!this.workerBusy && this.particleData && !this.config.paused) {
         this.workerBusy = true;
         this.worker.postMessage({ type: WorkerMessageType.Update });
       }
-    }
 
-    // Update meshes
-    if (this.particleData) {
-      this.renderer.updateParticles(this.particleData, this.config);
+      // Update meshes
+      if (this.particleData) {
+        this.renderer.updateParticles(this.particleData, this.config);
+      }
     }
 
     // Update the particle inspector overlay (marker + info box follow the particle)

@@ -8,6 +8,9 @@ An interactive particle simulation demonstrating emergent behavior patterns. Bui
 
 ## Features
 
+- **WebGPU simulation and rendering for 100,000+ particles**: physics runs in compute shaders with a spatial grid built on the GPU, and particles are drawn straight from GPU memory (falls back to a Web Worker with up to 7,000 particles when WebGPU is unavailable)
+- **Infinite canvas**: zoom out without limit (mouse wheel, anchored at the cursor) and drag to pan; particles stay visible at any scale
+- **7 particle types by default** with a random interaction matrix, so structures emerge right away
 - **Real-time particle physics** with configurable attraction/repulsion forces
 - **Multi-type particle system** with customizable interaction matrices
 - **Web Worker-based physics** for smooth performance with thousands of particles
@@ -20,7 +23,6 @@ An interactive particle simulation demonstrating emergent behavior patterns. Bui
 
 - **TypeScript** - Type-safe development
 - **Three.js** - 3D rendering
-- **lil-gui** - Lightweight GUI controls
 - **Vite** - Fast build tooling
 - **Bun** - JavaScript runtime and package manager
 - **Web Workers** - Offloaded physics calculations
@@ -53,21 +55,24 @@ bun run preview
 
 ## Usage
 
-### GUI Controls
+### Control panel
 
-- **Forces**: Adjust attraction, repulsion, and interaction radius
-- **Physics**: Configure equilibrium distance, hardness, drag, max speed, and inter-particle friction
-- **Particles**: Set particles per type, number of types, and visual radius
-- **World**: Toggle edge wrapping
-- **Mouse**: Select interaction mode (None, Repel, Attract) and configure radius/strength
-- **Effects**: Enable/disable trails, radiation, winds, and noise/turbulence
-- **Interactions**: Fine-tune how each particle type interacts with others
-- **Actions**: Reset simulation or randomize forces
+The interface is in Spanish and describes behaviour in plain language instead of parameter names.
+
+- **Especies**: preset cards with a drawn preview, population (total particles and number of species), species colours, and the **relationship grid**: each row is a species, each column the species it reacts to. Teal circles mean "chases", coral means "flees", and the circle size is the strength. Drag a cell up or down (or use the wheel or arrow keys) to change it. A sentence below the grid describes the cell you are editing.
+- **Física**: a live diagram of the force against distance, with sliders for personal space, reach, chase and flee strength, collision hardness, viscosity, speed, friction, agitation, and a direction pad for gravity
+- **Mundo**: world size, edge behaviour, particle size, colour by species or speed, trails
+- **Más**: photo, video, CSV export, saving and loading settings, microphone reaction, keyboard shortcuts
+
+Controls the WebGPU backend does not support (bloom, connections, heatmap, stats, radiation, wind, walls, attractors) only appear when the simulation runs on the CPU worker.
 
 ### Controls
 
-- **Click** on the canvas to add particles at that location
-- Use the **GUI panel** on the right to adjust all simulation parameters in real-time
+- **Tool dock** (bottom): Explore (1), Attract (2), Repel (3), Swirl (4), Sow particles (5), Wall (6, CPU only), Pause, Reset
+- **Mouse wheel / trackpad pinch**: zoom in/out around the cursor (no zoom-out limit)
+- **Drag** (left button when exploring, middle button with any tool): pan the camera
+- **F** or **Home**: fit the whole world in view; **Space**: pause; **R**: reset; **H**: hide the panel; **P**: photo
+- **Click** while exploring to follow a particle; with Sow, to add particles of the chosen species
 
 ## Project Structure
 
@@ -78,8 +83,19 @@ particle-simulation/
 │   ├── main.ts             # Application initialization
 │   ├── config/
 │   │   └── defaults.ts     # Default configuration
+│   ├── gpu/
+│   │   ├── compute-engine.ts    # WebGPU simulation step (grid + forces)
+│   │   ├── particle-renderer.ts # WebGPU particle drawing and trails
+│   │   ├── shaders.ts           # WGSL compute and render shaders
+│   │   └── webgpu-detect.ts     # Adapter/device setup
 │   ├── gui/
-│   │   └── controls.ts     # GUI controller
+│   │   ├── controls.ts          # Control panel (tabs, species, physics, world)
+│   │   ├── matrix-editor.ts     # Relationship grid
+│   │   ├── force-diagram.ts     # Force vs distance diagram
+│   │   ├── preset-thumbnails.ts # Preset cards
+│   │   ├── dock.ts              # Tool dock, HUD and zoom control
+│   │   ├── components.ts        # Sliders, switches, segmented controls
+│   │   └── styles.css
 │   ├── physics/
 │   │   ├── worker.ts       # Web Worker for physics
 │   │   ├── forces.ts       # Force calculations
@@ -107,5 +123,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Built with [Three.js](https://threejs.org/)
-- GUI powered by [lil-gui](https://lil-gui.georgealways.com/)
 - Generated with [Claude Opus 4.5](https://www.anthropic.com/claude) by Anthropic

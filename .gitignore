@@ -36,3 +36,9 @@ yarn-error.log*
 
 # Testing
 coverage/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Local review reports
+.reviews/
